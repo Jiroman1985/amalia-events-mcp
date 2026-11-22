@@ -18,7 +18,7 @@ for (const r of [...eventos].sort((a, b) => completitud(b.data) - completitud(a.
   for (const c of clavesDeEvento(r.id, d)) { const prev = deseadas.get(c.id); if (prev && prev.data.eventId !== r.id) { choques.push({ clave: c.data.clave, conserva: prev.data.eventId, sinClave: r.id }); continue; } deseadas.set(c.id, c); }
 }
 const crear = [], borrar = [], cambiar = [];
-for (const [id, c] of deseadas) { const e = existentes.get(id); if (!e) crear.push(c); else if (e.data.estado === 'liberada' || e.data.eventId !== c.data.eventId || e.data.titulo !== c.data.titulo || e.data.hora !== c.data.hora || e.data.recinto !== c.data.recinto || e.data.estado !== 'activa') cambiar.push(c); }
+for (const [id, c] of deseadas) { const e = existentes.get(id); if (!e) crear.push(c); else if (e.data.estado === 'liberada' || e.data.eventId !== c.data.eventId || e.data.titulo !== c.data.titulo || e.data.hora !== c.data.hora || e.data.recinto !== c.data.recinto) cambiar.push(c); }
 for (const [id, e] of existentes) if (!deseadas.has(id) && e.data.estado !== 'liberada') borrar.push(id);
 const huella = createHash('sha256').update(JSON.stringify([crear.map(c => c.id).sort(), borrar.sort(), cambiar.map(c => c.id).sort()])).digest('hex').slice(0, 16);
 const informe = { modo: arg('aplicar') ? 'APLICAR' : 'ENSAYO (no se ha escrito nada)', huella, resumen: { eventosActivos: eventos.filter(r => r.data?.retirado !== true).length, clavesDeseadas: deseadas.size, existentes: existentes.size, crear: crear.length, cambiar: cambiar.length, liberar: borrar.length, choques: choques.length }, choques };
