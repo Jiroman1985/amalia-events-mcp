@@ -322,10 +322,13 @@ export class EventService {
   // admitir_distinta
   const disc=typeof discriminador==='string'&&discriminador.trim()?discriminador.trim().slice(0,80):'';
   const input={...ev,requestId:'cola-'+row.id};
-  if(simular){const e=await this.canonicalForAdmission(input,principal);const claves=clavesDeEvento(eventIdentity(e),{...e,discriminadorSesion:disc});return {simulado:true,escrito:false,colaId:row.id,eventId:eventIdentity(e),claves:claves.map(c=>({clave:c.data.clave,fuerza:c.data.fuerza})),efecto:'Crearía la ficha como sesión distinta con el discriminador indicado.'};}
+  // La procedencia se verificó y autorizó al encolar (con el principal que la aportó): aquí se revalida contra el registro con permiso review acotado a esta comprobación.
+  const rawProc=row.data.procedenciaRegistro||null,principalProc=rawProc?{...principal,actions:[...new Set([...principal.actions,'review'])]}:principal;
+  if(simular){const e=await this.canonicalForAdmission(input,principal);if(rawProc)await this.registryContext(rawProc,e,principalProc);const claves=clavesDeEvento(eventIdentity(e),{...e,discriminadorSesion:disc});return {simulado:true,escrito:false,colaId:row.id,eventId:eventIdentity(e),conProcedenciaRegistro:!!rawProc,claves:claves.map(c=>({clave:c.data.clave,fuerza:c.data.fuerza})),efecto:'Crearía la ficha como sesión distinta con el discriminador indicado.'};}
   const gd=await this.catalogGuard({requireOpen:true});
-  let creada;
-  try{creada=await this.#createAdmitted(input,principal,{updateTime:gd.updateTime,epoch:gd.data.epoch},null,null,{discriminadorSesion:disc});}
+  let creada,registry=null;
+  try{if(rawProc){const e=await this.canonicalForAdmission(input,principal);registry=await this.registryContext(rawProc,e,principalProc);}
+   creada=await this.#createAdmitted(input,principal,{updateTime:gd.updateTime,epoch:gd.data.epoch},null,registry,{discriminadorSesion:disc});}
   catch(err){if(err.code==='session_key_conflict'&&!disc)fail('discriminador_required',{...err.details,ayuda:'La clave de sesión coincide con otra ficha: indica un discriminador (sala, actividad) que las distinga.'});throw err;}
   await cierra('admitida',{eventId:creada.eventId,discriminador:disc||null});
   return {colaId:row.id,estado:'admitida',eventId:creada.eventId,created:creada.created};
@@ -390,7 +393,7 @@ export class EventService {
    if(existing){assertReplayProvenance(existing.data,registry);if(existing.data.retirado===true)fail('event_retired',{eventId});if(existing.data.creationFingerprint===fingerprint(e)){authorize(principal,existing.data.negocioId,'read');return {created:false,alreadyCreated:true,eventId,...existing.data};}fail('duplicate_event_conflict',{eventId,revision:true});}
    if(this.clavesModo==='bloquea'&&!input.requestId)fail('invalid_field',{campo:'requestId',ayuda:'Toda alta lleva una clave de idempotencia: requestId (o idempotencyKey). Repetir la misma llamada devuelve el mismo resultado sin crear nada.'});
    const {guard:gd,scan}=await this.scanAdmisionFicha(e,input,{requireOpen:true});
-   if(this.clavesModo==='bloquea'&&scan.claves?.decision==='cola'){const q=await encolarRevision(this.store,{e,eventId,input,principal,scan});fail('requires_review',{colaId:q.id,coincidencias:scan.coincidencias,estado:'review_required',revision:true,ayuda:'Posible duplicado dudoso: queda en la cola revisar_candidatos. Solo Alfred decide (admitir como distinta, fusionar en el existente o descartar). No reintentes.'});}
+   if(this.clavesModo==='bloquea'&&scan.claves?.decision==='cola'){const q=await encolarRevision(this.store,{e,eventId,input,principal,scan,procedenciaRegistro:raw||null});fail('requires_review',{colaId:q.id,coincidencias:scan.coincidencias,estado:'review_required',revision:true,ayuda:'Posible duplicado dudoso: queda en la cola revisar_candidatos. Solo Alfred decide (admitir como distinta, fusionar en el existente o descartar). No reintentes.'});}
    if(scan.coincidencias.length)fail('duplicate_event_conflict',{coincidencias:scan.coincidencias,revision:true});
    if(provenanceProposal(this.proposal(e,input,principal,scan),registry)!==proposalHash)fail('proposal_changed',{huellaCampos:this.fieldPrints(e,input),ayuda:'Compara huellaCampos con la de preparar_admision: los campos con huella distinta son los que has cambiado. Pasa tal cual el campo evento devuelto y el mismo requestId.'});
    try{const res=await this.#createAdmitted(input,principal,{updateTime:gd.updateTime,epoch:gd.data.epoch},null,registry);const avisos=(scan.informativas||[]).filter(i=>i.motivos?.includes('posible_duplicado')).map(i=>({tipo:'posible_duplicado',eventId:i.eventId,mensaje:'Existe un evento con nombre muy parecido, misma fecha, lugar y hora. Se ha admitido; revisa si es el mismo.'}));return avisos.length&&res?.created!==false?{...res,avisos}:res;}

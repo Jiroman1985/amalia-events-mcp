@@ -238,3 +238,32 @@ test('MCP: un campo desconocido en buscar_duplicados_global o editar_evento devu
     assert.ok(!buena.result.isError, 'municipio, desde y hasta son filtros reales');
   } finally { app.closeAllConnections(); await new Promise(r => app.close(r)); }
 });
+
+test('claves débiles (sin hora ni recinto): título distinto pasa, título idéntico bloquea, título parecido va a la cola', async () => {
+  const { store, ev } = mk(); const b = { city: 'Tías', lugar: undefined, horaLocal: undefined, fechaLocal: '2099-12-12' };
+  await alta(ev, ficha({ ...b, titulo: 'Muestra de artesanía por Navidad' }));
+  await alta(ev, ficha({ ...b, titulo: 'Concierto de la banda municipal' })); // otro título: pasa
+  assert.equal(store.eventos().length, 2);
+  const igual = ficha({ ...b, titulo: 'Muestra de artesanía por Navidad' });
+  assert.equal((await ev.prepareAdmission(igual, alfred)).claves.decision, 'bloquea');
+  const parecido = ficha({ ...b, titulo: 'Muestra artesanía Navidad en Tías' });
+  assert.equal((await ev.prepareAdmission(parecido, alfred)).claves.decision, 'cola');
+});
+test('la procedenciaRegistro se conserva al resolver desde la cola (se guarda al encolar y se revalida con review acotado)', async () => {
+  const { store, ev } = mk(); const llamadas = [];
+  ev.registryContext = async (raw, e, p) => { if (raw === undefined) return null; llamadas.push({ raw, review: p.actions.includes('review') || p.actions.includes('*') }); return { hash: 'a'.repeat(64), input: raw, verify: { collection: 'registro_fuentes', key: 'f1', updateTime: 't' }, record: { policy: 'registro-v1', fuenteId: raw.fuenteId } }; };
+  const b = { city: 'Ronda', lugar: 'Fundación Unicaja', fechaLocal: '2099-12-09' };
+  await alta(ev, ficha({ ...b, titulo: 'Recital de guitarra Entre cuerdas y vías', horaLocal: '19:30' }));
+  const prov = { version: 1, fuenteId: 'fte_web_x', canalFuente: 'web' };
+  const c = ficha({ ...b, titulo: 'Entre cuerdas y vías recital de guitarra', horaLocal: undefined, procedenciaRegistro: prov });
+  const p = await ev.prepareAdmission(c, alfred);
+  const e1 = await ev.admitCandidate({ accion: 'admit', proposalHash: p.proposalHash, evento: c }, alfred).catch(e => e);
+  assert.equal(e1.code, 'requires_review');
+  const item = (await store.get('revisar_candidatos', e1.details.colaId)).data; assert.deepEqual(item.procedenciaRegistro, prov);
+  assert.equal(item.evento.procedenciaRegistro, undefined, 'el evento guardado no mezcla la procedencia');
+  const restricted = { ...alfred, actions: ['admit', 'read', 'complete', 'board_admin', 'retire'] };
+  llamadas.length = 0;
+  const r = await ev.resolverRevision({ colaId: e1.details.colaId, accion: 'admitir_distinta', motivo: 'es otra sesión', discriminador: 'sin hora' }, restricted);
+  assert.equal(r.estado, 'admitida'); assert.deepEqual(llamadas[0].raw, prov); assert.equal(llamadas[0].review, true);
+  const ev1 = store.rows.get('eventos/' + r.eventId).data; assert.equal(ev1.provenanceHash, 'a'.repeat(64)); assert.equal(ev1.procedenciaRegistro.fuenteId, 'fte_web_x');
+});
