@@ -5,7 +5,7 @@ import {ProgramAdmission} from './program-admission.mjs';
 import { claveNombre, escanearDuplicados, informativaPorFuente, motivoSesion, horarioImplicitoDistinto, municipioDistintoAviso, reglaDuplicado, clasificarCoincidencias } from './dedup_amalia.mjs';
 import { randomUUID } from 'node:crypto';
 import { agenteCanonico } from './identidad.mjs';
-import { conPlazo,DomainError,assertFuentePrimaria,mergeSources,tituloSoloForma,canonicalInputExtras,canonicalInput,eventIdentity,fingerprint,record,authorize,authorizeCapture,id,fail,hash,originKey,normalizeText } from './event-domain.mjs';
+import { normSesiones,conPlazo,DomainError,assertFuentePrimaria,mergeSources,tituloSoloForma,canonicalInputExtras,canonicalInput,eventIdentity,fingerprint,record,authorize,authorizeCapture,id,fail,hash,originKey,normalizeText } from './event-domain.mjs';
 
 // Campos opcionales de ficha en candidatos privados: se validan con las mismas reglas que la admisión.
 const extrasCandidato=input=>{const {etiquetas,direccion,fuente_nombre,fuente_tipo,fuenteId}=canonicalInputExtras(input);return {...(fuenteId?{fuenteId}:{}),...(etiquetas?{etiquetas}:{}),...(direccion?{direccion}:{}),...(fuente_nombre?{fuente_nombre}:{}),...(fuente_tipo?{fuente_tipo}:{})};};
@@ -608,9 +608,9 @@ export class EventService {
   return this.#applyEdit({eventId,negocioId,expectedVersion,changes,reason,evidenciaUrl,mode:'edit',simular:simular===true},principal);
  }
  async #applyEdit({eventId,negocioId,expectedVersion,changes,reason,evidenciaUrl,mode,simular=false},principal) {
-  const ALLOWED=new Set(['sesiones','titulo','descripcion','city','fechaLocal','horaLocal','timeZone','dateTime','dateTimeEnd','fechaFinLocal','sesionId','origen','fuentes','lugar','categoria','categorias','tipo','precio','precioInfo','geoUbicacion','provincia','pais','aforo','assetId','image','imageRights','sustainableTip','publicTransport','etiquetas','direccion','fuente_nombre','fuente_tipo','verificationStatus','conflictos','cta','prueba']);
-  const IDENTITY=new Set(['titulo','city','fechaLocal','horaLocal','timeZone','dateTime','dateTimeEnd','fechaFinLocal','sesionId','origen','fuentes','lugar']);
-  const SCAN=['titulo','city','fechaLocal','horaLocal','dateTime','sesionId','origen','fuentes'];
+  const ALLOWED=new Set(['sesiones','titulo','descripcion','city','fechaLocal','horaLocal','timeZone','dateTime','dateTimeEnd','fechaFinLocal','sesionId','origen','fuentes','lugar','categoria','categorias','tipo','precio','precioInfo','geoUbicacion','provincia','pais','aforo','assetId','image','imageRights','sustainableTip','publicTransport','etiquetas','direccion','fuente_nombre','fuente_tipo','verificationStatus','conflictos','cta','prueba','fuenteId','link']);
+  const IDENTITY=new Set(['titulo','city','fechaLocal','horaLocal','timeZone','dateTime','dateTimeEnd','fechaFinLocal','sesionId','origen','fuentes','lugar','link','sesiones']);
+  const SCAN=['titulo','city','fechaLocal','horaLocal','dateTime','sesionId','origen','fuentes','sesiones'];
   if(Object.keys(changes).some(k=>!ALLOWED.has(k)))fail(['link','ubicacion','temporalidad'].some(k=>k in changes)?'immutable_event_identity':'immutable_or_unknown_field');
   // En completar, añadir fuentes solo suma procedencia (la propia URL nueva es la evidencia).
   const identityTouched=Object.keys(changes).filter(k=>IDENTITY.has(k)&&!(mode==='complete'&&k==='fuentes'));
@@ -625,6 +625,23 @@ export class EventService {
    const old=before.data,ch={...changes};
    if('titulo' in ch&&!tituloSoloForma(old.titulo??old.nombre,ch.titulo,[old.city,ch.city]))fail('title_meaning_changed',{ayuda:'Solo se corrigen mayúsculas, signos, fechas o ciudad incrustados. Un título con otro significado es otro evento: retira y da de alta.'});
    if('fuentes' in ch){ch.fuentes=mergeSources(old.fuentes,ch.fuentes);assertFuentePrimaria(ch.fuentes);}
+   if('fuenteId' in ch){
+    if(ch.fuenteId===null)fail('invalid_source_id',{ayuda:'fuenteId no se puede quitar desde editar_evento; indica el id de la fuente correcta.'});
+    const f=typeof ch.fuenteId==='string'?ch.fuenteId.trim():'';
+    if(!/^(fte_[a-z]+_[0-9a-f]{24}|F-[A-Z0-9]{2,6}-\d{3,5})$/.test(f))fail('invalid_source_id',{ayuda:'fuenteId: el id de la fuente en el registro de fuentes (fte_… o F-XXX-0000), el que devuelve buscar_fuente/registrar_fuente.'});
+    if(f.startsWith('fte_')&&!(await this.store.get('registro_fuentes',f)))fail('source_not_found',{fuenteId:f,ayuda:'Esa fuente no existe en registro_fuentes: búscala con buscar_fuente.'});
+    ch.fuenteId=f;
+   }
+   if('sesiones' in ch){
+    // Solo se AÑADEN sesiones: la lista nueva debe contener las que ya tiene la ficha y ninguna anterior a su fecha principal.
+    const nuevas=normSesiones(ch.sesiones),clave=x=>x.fechaLocal+'|'+(x.horaLocal||'');
+    const previas=(Array.isArray(old.sesiones)&&old.sesiones.length?old.sesiones:[{fechaLocal:old.fechaLocal??old.fecha_inicio,horaLocal:old.horaLocal??old.hora??null}]).filter(x=>x.fechaLocal);
+    const faltan=previas.filter(x=>!nuevas.some(y=>clave(y)===clave(x)));
+    if(faltan.length)fail('sessions_cannot_be_removed',{faltan:faltan.map(x=>({fechaLocal:x.fechaLocal,horaLocal:x.horaLocal||null})),ayuda:'editar_evento solo añade sesiones: incluye también las que ya tiene la ficha.'});
+    if(old.fechaLocal&&nuevas[0].fechaLocal<old.fechaLocal)fail('session_before_primary',{fechaLocal:old.fechaLocal,ayuda:'Una sesión anterior a la fecha principal cambia la identidad de la ficha: edita fechaLocal con evidenciaUrl.'});
+    ch.sesiones=nuevas;
+    const ultima=nuevas.at(-1).fechaLocal;if(!('fechaFinLocal' in ch)&&ultima>(old.fechaLocal||'')&&(old.fechaFinLocal==null||old.fechaFinLocal<ultima))ch.fechaFinLocal=ultima;
+   }
    let reserveMove=null;
    if('origen' in ch){
     const o0=old.origen;if(!o0)fail('origin_cannot_be_added');

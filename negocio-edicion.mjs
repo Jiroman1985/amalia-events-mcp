@@ -19,7 +19,7 @@ export async function editarNegocio(store, input, principal) {
   const fi = { ...(d.fuentesInformacion || {}) }, set = {};
   if ('nombre' in cambios) { if (typeof cambios.nombre !== 'string' || cambios.nombre.trim().length < 2 || cambios.nombre.length > 180) fail('invalid_field', { campo: 'nombre' }); set.nombre = cambios.nombre.trim(); set.name = set.nombre; }
   if ('direccion' in cambios) { if (cambios.direccion !== null && (typeof cambios.direccion !== 'string' || cambios.direccion.trim().length < 2 || cambios.direccion.length > 200)) fail('invalid_field', { campo: 'direccion' }); set.direccion = cambios.direccion === null ? null : cambios.direccion.trim(); }
-  if ('sitioWeb' in cambios) { if (cambios.sitioWeb === null) fail('invalid_field', { campo: 'sitioWeb', ayuda: 'El sitio web no se puede quitar; corrígelo con la URL buena.' }); fi.sitioWeb = url(cambios.sitioWeb, 'sitioWeb'); }
+  if ('sitioWeb' in cambios) { if (cambios.sitioWeb === null) delete fi.sitioWeb; else fi.sitioWeb = url(cambios.sitioWeb, 'sitioWeb'); }
   for (const r of REDES) if (r in cambios) { if (cambios[r] === null) delete fi[r]; else fi[r] = String(cambios[r]).trim().slice(0, 300); if (cambios[r] !== null && !fi[r]) fail('invalid_field', { campo: r }); }
   if (!fi.sitioWeb && !REDES.some(r => fi[r])) fail('source_required', { ayuda: 'El negocio debe conservar al menos una fuente pública.' });
   if (cambios.sitioWeb !== undefined || REDES.some(r => r in cambios)) set.fuentesInformacion = fi;

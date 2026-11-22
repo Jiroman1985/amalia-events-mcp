@@ -165,6 +165,13 @@ Pruebas reproducibles: `FIRESTORE_EMULATOR_HOST=127.0.0.1:8686 AMALIA_TEST_PUBLI
 - Municipio con alias (`Lumbier/Irunberri`, `Donostia`/`San Sebastián`…, tabla ampliable en `clave-sesion.mjs`); una clave por **día** en rangos `fechaLocal`–`fechaFinLocal` (hasta 31 días); el tipo de recinto (teatro, auditorio, museo, iglesia, plaza…) ya no se quita; fecha/hora de eventos antiguos desde `dateTime` en hora de Madrid.
 - `rellenar_claves.mjs`: lo que sobra se libera, no se borra.
 
+## 2.25.5 — lote de ediciones (SIGUE EN SOMBRA)
+
+- `editar_evento`: acepta `fuenteId` (debe existir en `registro_fuentes`), `link` (exige `evidenciaUrl`) y `sesiones` (solo AÑADE sesiones: lista completa que incluya las existentes, sin anteriores a la fecha principal; exige evidenciaUrl, escaneo de duplicados y ajusta `fechaFinLocal`).
+- `editar_negocio`: `sitioWeb:null` lo quita (el negocio debe conservar otra fuente pública).
+- `decidir_hilo`: valida `decision` (obligatoria, texto de 1 a 2000) con `board_decision_requerida` / `board_decision_invalida`.
+- `arrancar.sh`: arranque del contenedor con `/home/ec2-user/amalia-events.env` (chmod 600, fuera del repo).
+
 ## 2.25.4 — estado «en pausa» en el panel (SIGUE EN SOMBRA)
 
 - `resumen_tareas` devuelve `estadoPanel` por agente: `en_curso`, `en_pausa` (nada en curso pero con tanda siguiente programada), `bloqueado` (solo si algo depende del propio agente) o `sin_tareas`.

@@ -138,7 +138,13 @@ export async function resolver(store, input, principal, { now = () => new Date()
 }
 /** Solo Alfred: registra la decisión en el hilo y lo cierra. */
 export async function decidirHilo(store, input, principal, { now = () => new Date().toISOString() } = {}) {
-  admin(principal); limita(principal);
+  admin(principal);
+  const dec = input.decision;
+  if (dec === undefined || dec === null) fail('board_decision_requerida', { campo: 'decision', ayuda: 'Falta «decision»: el texto de la decisión (1 a 2000 caracteres).' });
+  if (typeof dec !== 'string') fail('board_decision_invalida', { campo: 'decision', recibido: typeof dec, ayuda: '«decision» debe ser un texto, no un objeto, lista ni número.' });
+  if (!dec.trim()) fail('board_decision_requerida', { campo: 'decision', ayuda: '«decision» está vacía: escribe el texto de la decisión (1 a 2000 caracteres).' });
+  if (dec.trim().length > 2000) fail('board_decision_invalida', { campo: 'decision', maximo: 2000, longitud: dec.trim().length, ayuda: '«decision» supera los 2000 caracteres: resúmela.' });
+  limita(principal);
   const raiz = await store.get(COL, input.hilo); if (!raiz || raiz.data.es_raiz !== true) fail('board_hilo_no_encontrado', { hilo: input.hilo });
   const id = nuevoId(), yo = agenteDe(principal.id), def = [...new Set([raiz.data.agente, ...raiz.data.destinatarios].filter(x => x && x !== yo))];
   await store.write(COL, id, { id, hilo: raiz.id, es_raiz: false, autor: yo, principal: principal.id, agente: yo, tipo: 'decision', asunto: raiz.data.asunto, texto: text(input.decision, 1, 2000, 'board_texto_invalido'), destinatarios: def.length ? def : ['todos'], prioridad: raiz.data.prioridad, estado: 'abierto', referencias: referencias(input.referencias), creado_en: now() }, { create: true });
