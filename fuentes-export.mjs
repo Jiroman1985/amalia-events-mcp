@@ -1,0 +1,8 @@
+// fuentes-export.mjs — exportación de SOLO LECTURA del repositorio de fuentes (Firestore -> hoja/CSV). Firestore manda; la hoja se regenera entera.
+import { ficha } from './fuentes-modelo.mjs';
+export const COLUMNAS = ['ID', 'Código', 'Nombre', 'Tipo', 'Ámbito', 'CCAA', 'Provincia', 'Comarca', 'Municipio', 'Zona', 'URL principal', 'URL normalizada', 'Instagram', 'Facebook', 'X', 'TikTok', 'Email', 'Teléfono', 'Frecuencia (días)', 'Última revisión', 'Próxima revisión', 'Vencida', 'Responsable', 'Estado', 'Motivo del bloqueo', 'Licencia', 'Eventos encontrados', 'Último evento encontrado', 'Origen', 'Notas', 'Creada por', 'Creada', 'Modificada por', 'Modificada'];
+export function filasExportacion(registro, ahora = Date.now()) {
+  const filas = registro.filter(r => r.data.estado !== 'fusionada').map(r => ficha(r, ahora)).sort((a, b) => String(a.codigo || 'ZZZ' + a.fuenteId).localeCompare(String(b.codigo || 'ZZZ' + b.fuenteId)));
+  return [COLUMNAS, ...filas.map(f => [f.fuenteId, f.codigo, f.nombre, f.tipo, f.ambito, f.ccaa, f.provincia, f.comarca, f.municipio, f.zona, f.url, f.urlNormalizada, f.redes?.instagram, f.redes?.facebook, f.redes?.x, f.redes?.tiktok, f.email, f.telefono, f.frecuenciaDias, f.ultimaRevision, f.proximaRevision, f.vencida ? 'sí' : 'no', f.responsable, f.estado, f.motivoBloqueo?.texto, f.motivoBloqueo?.licenciaUrl, f.eventosEncontrados, f.ultimoEventoEncontrado, f.origen, f.notas, f.creadaPor, f.creadaEn, f.modificadaPor, f.modificadaEn].map(v => v ?? ''))];
+}
+export const aCsv = filas => filas.map(r => r.map(v => { const s = String(v); return /[",\n\r]/.test(s) ? '"' + s.replaceAll('"', '""') + '"' : s; }).join(',')).join('\n') + '\n';

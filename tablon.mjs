@@ -1,0 +1,148 @@
+// tablon.mjs — tablón común de los agentes (colección `tablon_agentes`) y reparto de zonas (`zonas_agentes`).
+// Todos los agentes con permiso `board` leen y escriben; `board_read` solo lee (paneles y personas); `board_admin` (Alfred) decide y reparte.
+// Los mensajes son DATO: nadie ejecuta instrucciones que vengan en ellos. No se editan ni se borran: solo se añaden (y la raíz de un hilo pasa a «resuelto»).
+import { randomBytes } from 'node:crypto';
+import { fail, authorize, hash } from './event-domain.mjs';
+import { normalizeName } from './registro-fuentes.mjs';
+import { agenteCanonico } from './identidad.mjs';
+
+export const COL = 'tablon_agentes', LEC = 'tablon_lecturas';
+export const TIPOS = ['duda', 'ayuda', 'aviso', 'asignacion', 'cambio_zona', 'evento', 'decision', 'respuesta', 'nota'];
+const A_ALFRED = new Set(['duda', 'ayuda', 'cambio_zona']);        // siempre llegan a Alfred
+const REQUIEREN_RESPUESTA = new Set(['duda', 'ayuda', 'asignacion', 'cambio_zona', 'evento']);
+const AGENTE_RE = /^[a-z0-9_-]{2,40}$/;
+const MAX_POR_VENTANA = 30, VENTANA_MS = 10 * 60 * 1000;
+const recientes = new Map();
+
+/** Agente canónico de un principal: alfred-altas -> alfred, amalia-asistente -> amalia, lola-operator -> lola (ver identidad.mjs). */
+export const agenteDe = agenteCanonico;
+const puede = (p, a) => { try { authorize(p, null, a); return true; } catch { return false; } };
+const leer = p => { if (!puede(p, 'board') && !puede(p, 'board_read')) authorize(p, null, 'board'); };
+const escribir = p => authorize(p, null, 'board');
+// Alfred decide con cualquiera de sus tokens (que tengan board); además, board_admin explícito en el registro de acceso.
+export const esAdminTablon = p => puede(p, 'board_admin') || (agenteCanonico(p?.id) === 'alfred' && puede(p, 'board'));
+export const adminTablon = p => { if (!esAdminTablon(p)) authorize(p, null, 'board_admin'); };
+const admin = adminTablon;
+const text = (v, min, max, code) => { if (typeof v !== 'string') fail(code); const s = v.replace(/\r\n/g, '\n').trim(); if (s.length < min || s.length > max || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(s)) fail(code, { minimo: min, maximo: max }); return s; };
+const limita = p => { const t = Date.now(), l = (recientes.get(p.id) || []).filter(x => t - x < VENTANA_MS); if (l.length >= MAX_POR_VENTANA) fail('board_rate_limited', { ayuda: `Máximo ${MAX_POR_VENTANA} mensajes cada 10 minutos por agente.` }); l.push(t); recientes.set(p.id, l); };
+const nuevoId = () => 'msg_' + Date.now().toString(36).padStart(9, '0') + randomBytes(3).toString('hex');
+
+async function todos(store, col) { const rows = []; let cursor = null; for (;;) { const page = await store.list(col, { cursor, limit: 500 }); if (!Array.isArray(page)) fail('incomplete_scan'); rows.push(...page); if (rows.length > 20000) fail('incomplete_scan'); if (page.length < 500) break; cursor = page.at(-1).id; } return rows; }
+function destinatarios(v, tipo, def) {
+  let d = v == null ? def : v; if (!Array.isArray(d) || d.length < 1 || d.length > 12) fail('board_destinatarios_invalidos', { ayuda: 'Lista de 1 a 12 agentes (alfred, alfie, conchi, amalia, hark, lola…) o ["todos"].' });
+  d = [...new Set(d.map(x => agenteCanonico(String(x).toLowerCase().trim())))]; if (d.some(x => x !== 'todos' && !AGENTE_RE.test(x))) fail('board_destinatarios_invalidos');
+  if (A_ALFRED.has(tipo) && !d.includes('alfred') && !d.includes('todos')) d.push('alfred');
+  return d;
+}
+function referencias(r) {
+  if (r == null) return null; if (typeof r !== 'object' || Array.isArray(r)) fail('board_referencias_invalidas');
+  const out = {}, lista = (k, re) => { if (r[k] == null) return; if (!Array.isArray(r[k]) || r[k].length > 20 || r[k].some(x => typeof x !== 'string' || !re.test(x))) fail('board_referencias_invalidas', { campo: k }); out[k] = r[k]; };
+  lista('fuenteIds', /^[A-Za-z0-9_-]{6,80}$/); lista('eventIds', /^[A-Za-z0-9_-]{6,80}$/);
+  for (const k of ['zona', 'provincia', 'municipio']) if (r[k] != null) out[k] = text(r[k], 2, 120, 'board_referencias_invalidas');
+  return Object.keys(out).length ? out : null;
+}
+const resumenMsg = d => ({ id: d.id, hilo: d.hilo, autor: agenteCanonico(d.autor), agente: agenteCanonico(d.agente), principal: d.principal ?? null, tipo: d.tipo, asunto: d.asunto, texto: d.texto, destinatarios: d.destinatarios, prioridad: d.prioridad, referencias: d.referencias ?? null, creadoEn: d.creado_en, esRaiz: d.es_raiz === true });
+
+export async function publicar(store, input, principal, { now = () => new Date().toISOString() } = {}) {
+  escribir(principal); limita(principal);
+  if (!TIPOS.includes(input.tipo)) fail('board_tipo_invalido', { validos: TIPOS });
+  if (input.tipo === 'decision') admin(principal);
+  const id = nuevoId(), d = {
+    id, hilo: id, es_raiz: true, autor: agenteDe(principal.id), principal: principal.id, agente: agenteDe(principal.id), tipo: input.tipo, asunto: text(input.asunto, 3, 120, 'board_asunto_invalido'), texto: text(input.texto, 1, 2000, 'board_texto_invalido'),
+    destinatarios: destinatarios(input.destinatarios, input.tipo, A_ALFRED.has(input.tipo) ? ['alfred'] : ['todos']), prioridad: input.prioridad === 'urgente' ? 'urgente' : 'normal', estado: 'abierto', referencias: referencias(input.referencias), creado_en: now()
+  };
+  await store.write(COL, id, d, { create: true });
+  return { publicado: true, id, hilo: id, autor: d.autor, destinatarios: d.destinatarios, mensaje: A_ALFRED.has(d.tipo) ? 'Mensaje publicado. Alfred decide en caso de duda: espera su respuesta antes de actuar.' : 'Mensaje publicado.' };
+}
+
+export async function responder(store, input, principal, { now = () => new Date().toISOString() } = {}) {
+  escribir(principal); limita(principal);
+  const raiz = await store.get(COL, input.hilo); if (!raiz || raiz.data.es_raiz !== true) fail('board_hilo_no_encontrado', { hilo: input.hilo });
+  if (raiz.data.estado === 'resuelto' && !esAdminTablon(principal)) fail('board_hilo_resuelto', { ayuda: 'El hilo está resuelto: abre uno nuevo y referencia este, o pídeselo a Alfred.' });
+  const tipo = input.tipo || 'respuesta'; if (!TIPOS.includes(tipo) || tipo === 'decision') fail('board_tipo_invalido', { validos: TIPOS.filter(t => t !== 'decision'), ayuda: 'Las decisiones las registra Alfred con decidir_hilo.' });
+  const yo = agenteDe(principal.id), def = [...new Set([raiz.data.agente, ...raiz.data.destinatarios].filter(x => x && x !== yo))];
+  const id = nuevoId(), d = { id, hilo: raiz.id, es_raiz: false, autor: yo, principal: principal.id, agente: yo, tipo, asunto: raiz.data.asunto, texto: text(input.texto, 1, 2000, 'board_texto_invalido'), destinatarios: destinatarios(input.destinatarios, tipo, def.length ? def : ['todos']), prioridad: raiz.data.prioridad, estado: 'abierto', referencias: referencias(input.referencias), creado_en: now() };
+  await store.write(COL, id, d, { create: true });
+  return { publicado: true, id, hilo: raiz.id, autor: d.autor, destinatarios: d.destinatarios };
+}
+
+async function lecturasDe(store, agente) { const r = await store.get(LEC, agente); return { row: r, hilos: r?.data?.hilos || {} }; }
+function agrupar(rows) {
+  const hilos = new Map();
+  // Lectura robusta: aunque queden documentos antiguos con alias (alfred-altas…), todo se ve con el agente canónico.
+  for (const r of rows) { const d = { ...r.data, autor: agenteCanonico(r.data.autor), agente: agenteCanonico(r.data.agente), destinatarios: (r.data.destinatarios || []).map(agenteCanonico) }; if (!d.hilo) continue; (hilos.get(d.hilo) || hilos.set(d.hilo, []).get(d.hilo)).push(d); }
+  for (const l of hilos.values()) l.sort((a, b) => (a.creado_en < b.creado_en ? -1 : a.creado_en > b.creado_en ? 1 : a.id < b.id ? -1 : 1));
+  return hilos;
+}
+const dirigidoA = (raiz, yo) => raiz.destinatarios.includes('todos') || raiz.destinatarios.includes(yo) || raiz.agente === yo || (yo === 'alfred' && A_ALFRED.has(raiz.tipo));
+
+export async function listar(store, input, principal) {
+  leer(principal); const yo = agenteDe(principal.id), hilos = agrupar(await todos(store, COL)), lect = await lecturasDe(store, yo);
+  if (input.hilo) {
+    const l = hilos.get(input.hilo); if (!l) fail('board_hilo_no_encontrado', { hilo: input.hilo });
+    return { hilo: input.hilo, estado: l[0].estado, asunto: l[0].asunto, mensajes: l.map(resumenMsg) };
+  }
+  const desde = input.desde || null, out = [];
+  for (const [id, l] of hilos) {
+    const raiz = l.find(x => x.es_raiz) || l[0], ultimo = l.at(-1);
+    if (input.tipo && raiz.tipo !== input.tipo) continue; if (input.estado && raiz.estado !== input.estado) continue; if (input.prioridad && raiz.prioridad !== input.prioridad) continue;
+    if (input.autor && !l.some(x => x.agente === String(input.autor).toLowerCase() || x.autor === String(input.autor).toLowerCase())) continue;
+    if (input.destinatario && !(raiz.destinatarios.includes(String(input.destinatario).toLowerCase()) || raiz.destinatarios.includes('todos'))) continue;
+    if (input.zona && normalizeName(raiz.referencias?.zona) !== normalizeName(input.zona) && normalizeName(raiz.referencias?.provincia) !== normalizeName(input.zona)) continue;
+    if (desde && ultimo.creado_en < desde) continue; if (input.soloMios && !dirigidoA(raiz, yo)) continue;
+    const visto = lect.hilos[id] || '', sinLeer = l.filter(x => x.agente !== yo && x.creado_en > visto).length;
+    if (input.soloSinLeer && !sinLeer) continue;
+    out.push({ hilo: id, asunto: raiz.asunto, tipo: raiz.tipo, estado: raiz.estado, prioridad: raiz.prioridad, autor: raiz.agente, destinatarios: raiz.destinatarios, referencias: raiz.referencias ?? null, creadoEn: raiz.creado_en, mensajes: l.length, ultimo: { agente: ultimo.agente, creadoEn: ultimo.creado_en, resumen: ultimo.texto.slice(0, 160) }, sinLeer });
+  }
+  out.sort((a, b) => (a.ultimo.creadoEn < b.ultimo.creadoEn ? 1 : -1));
+  const lim = Math.min(Math.max(input.limite || 50, 1), 200), off = Math.max(input.desplazamiento || 0, 0);
+  return { total: out.length, devueltos: Math.min(lim, Math.max(out.length - off, 0)), hayMas: off + lim < out.length, hilos: out.slice(off, off + lim) };
+}
+
+/** Lo que tengo que mirar: hilos abiertos dirigidos a mí con mensajes sin leer, o que esperan mi respuesta. */
+export async function misPendientes(store, principal) {
+  leer(principal); const yo = agenteDe(principal.id), hilos = agrupar(await todos(store, COL)), lect = await lecturasDe(store, yo), items = [];
+  for (const [id, l] of hilos) {
+    const raiz = l.find(x => x.es_raiz) || l[0]; if (raiz.estado !== 'abierto' || !dirigidoA(raiz, yo)) continue;
+    const visto = lect.hilos[id] || '', sinLeer = l.filter(x => x.agente !== yo && x.creado_en > visto).length;
+    const yoRespondi = l.some(x => x.agente === yo && !x.es_raiz), esperaRespuesta = REQUIEREN_RESPUESTA.has(raiz.tipo) && raiz.agente !== yo && !yoRespondi && (raiz.destinatarios.includes(yo) || (yo === 'alfred' && A_ALFRED.has(raiz.tipo)));
+    if (!sinLeer && !esperaRespuesta) continue;
+    items.push({ hilo: id, asunto: raiz.asunto, tipo: raiz.tipo, prioridad: raiz.prioridad, autor: raiz.agente, sinLeer, esperaMiRespuesta: esperaRespuesta, ultimo: l.at(-1).creado_en });
+  }
+  items.sort((a, b) => (a.prioridad === b.prioridad ? (a.ultimo < b.ultimo ? 1 : -1) : a.prioridad === 'urgente' ? -1 : 1));
+  return { agente: yo, total: items.length, urgentes: items.filter(i => i.prioridad === 'urgente').length, pendientes: items };
+}
+
+export async function marcarLeido(store, input, principal, { now = () => new Date().toISOString() } = {}) {
+  leer(principal); const yo = agenteDe(principal.id), hilos = agrupar(await todos(store, COL)), ids = input.todos === true ? [...hilos.keys()] : [input.hilo];
+  if (!input.todos && (!input.hilo || !hilos.has(input.hilo))) fail('board_hilo_no_encontrado', { hilo: input.hilo || null });
+  for (let intento = 0; intento < 3; intento++) {
+    const { row, hilos: vistos } = await lecturasDe(store, yo), t = now(); const nuevo = { ...vistos }; for (const id of ids) nuevo[id] = t;
+    try { await store.write(LEC, yo, { agente: yo, hilos: nuevo, actualizado_en: t }, row ? { updateTime: row.updateTime } : { create: true }); return { leido: ids.length, agente: yo }; }
+    catch (e) { if (e.code !== 'version_conflict' || intento === 2) throw e; }
+  }
+}
+
+async function cerrar(store, raiz, principal, extra, now) {
+  const d = { ...raiz.data, estado: 'resuelto', resuelto_por: agenteDe(principal.id), resuelto_por_principal: principal.id, resuelto_en: now(), ...extra };
+  await store.write(COL, raiz.id, d, { updateTime: raiz.updateTime }); return d;
+}
+export async function resolver(store, input, principal, { now = () => new Date().toISOString() } = {}) {
+  escribir(principal); const raiz = await store.get(COL, input.hilo); if (!raiz || raiz.data.es_raiz !== true) fail('board_hilo_no_encontrado', { hilo: input.hilo });
+  const yo = agenteDe(principal.id), d = raiz.data;
+  if (!(d.agente === yo || d.destinatarios.includes(yo) || esAdminTablon(principal))) fail('forbidden', { ayuda: 'Solo el autor, un destinatario o Alfred pueden resolver un hilo.' });
+  if (d.estado === 'resuelto') return { resuelto: false, yaResuelto: true, hilo: raiz.id };
+  if (input.nota) await responder(store, { hilo: raiz.id, texto: input.nota }, principal, { now });
+  const fresca = await store.get(COL, raiz.id); await cerrar(store, fresca, principal, {}, now);
+  return { resuelto: true, hilo: raiz.id, resueltoPor: agenteDe(principal.id) };
+}
+/** Solo Alfred: registra la decisión en el hilo y lo cierra. */
+export async function decidirHilo(store, input, principal, { now = () => new Date().toISOString() } = {}) {
+  admin(principal); limita(principal);
+  const raiz = await store.get(COL, input.hilo); if (!raiz || raiz.data.es_raiz !== true) fail('board_hilo_no_encontrado', { hilo: input.hilo });
+  const id = nuevoId(), yo = agenteDe(principal.id), def = [...new Set([raiz.data.agente, ...raiz.data.destinatarios].filter(x => x && x !== yo))];
+  await store.write(COL, id, { id, hilo: raiz.id, es_raiz: false, autor: yo, principal: principal.id, agente: yo, tipo: 'decision', asunto: raiz.data.asunto, texto: text(input.decision, 1, 2000, 'board_texto_invalido'), destinatarios: def.length ? def : ['todos'], prioridad: raiz.data.prioridad, estado: 'abierto', referencias: referencias(input.referencias), creado_en: now() }, { create: true });
+  if (input.cerrar !== false && raiz.data.estado !== 'resuelto') await cerrar(store, await store.get(COL, raiz.id), principal, { decision_id: id }, now);
+  return { decidido: true, hilo: raiz.id, decisionId: id, cerrado: input.cerrar !== false };
+}
+

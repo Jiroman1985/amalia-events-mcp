@@ -1,0 +1,15 @@
+node_modules/
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+firebase.json
+access.json
+publishing.json
+kalma-bridge.key
+backups/
+informe-*.json
+ensayo-*.json
+*.tgz
+*.log
