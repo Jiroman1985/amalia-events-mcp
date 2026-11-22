@@ -147,3 +147,13 @@ Pruebas reproducibles: `FIRESTORE_EMULATOR_HOST=127.0.0.1:8686 AMALIA_TEST_PUBLI
 ### 2.14.0
 - Caché del universo del catálogo por versión de guardia (`preparar_admision` ~0,3 s en caliente; carga fría ~10 s en paralelo), precalentada tras cada commit y al arrancar.
 - `consultar_recibo_admision` por `requestId` (negocioId opcional) y estado `en_proceso`.
+
+## 2.25.0 — control de duplicados por clave de sesión (SIN DESPLEGAR)
+
+- `clave-sesion.mjs`: clave canónica `municipio|fecha ISO|hora o sin_hora|recinto` (sin título; recinto sin artículos/genéricos solo si queda algún término). Fuerza: fuerte (hora y recinto), media, débil.
+- Colección `sesiones_clave/{hash}`: ID = hash de la clave si es fuerte (única en todo el catálogo); si no, incluye el eventId (solo índice). Se crea/borra en el **mismo commit atómico** que el evento (`exists:false`). Retirar libera la clave; recuperar la retoma; editar fecha/hora/recinto la mueve.
+- `AMALIA_CLAVES=off|sombra|bloquea` (por defecto `off`). `sombra`: mantiene claves y compara en el log sin bloquear. `bloquea`: preparar/admitir/editar deciden por consultas `municipioFecha` y lecturas puntuales; **no hay escaneos completos ni precarga del catálogo**; `requestId`/`idempotencyKey` obligatorio; `confirmarOtraSesion` deja de poder saltarse avisos.
+- Cola `revisar_candidatos` (`listar_revision_candidatos`, `resolver_revision_candidato`, solo `board_admin`): admitir_distinta (con `discriminador` si la clave choca), fusionar o descartar.
+- `forbidden` incluye `accionRequerida`; herramientas de escritura y `buscar_duplicados_global` rechazan campos desconocidos (error con el nombre del campo); `buscar_duplicados_global` acepta `municipio`, `desde`, `hasta`; `simular` en admitir_candidato, completar_evento, retirar_evento, resolver_revision_candidato.
+- Scripts: `rellenar_claves.mjs` (backfill/reconciliación, ensayo + `--aplicar --confirmo`), `auditoria_duplicados.mjs` (propone; `--encolar`, `--guardar`; `--retirar` es la fase 2, solo con aprobación).
+- Tests: `tests/claves-duplicados.test.mjs` (casos reales y concurrencia de 5 altas simultáneas: entra una).

@@ -85,7 +85,7 @@ const find = (store, input = {}) => new EventService(store, {}, { warm: false })
 test('global: incluye alcance aplicado, traza y recuento por estado; exhaustivo cuando se llega al final', async () => {
   const r = await find(new Store(mk(1200)));
   assert.equal(r.exhaustivo, true); assert.equal(r.escaneados, 1200); assert.ok(/^[0-9a-f-]{36}$/.test(r.traza));
-  assert.equal(r.alcance.coleccion, 'eventos'); assert.deepEqual(r.alcance.filtros, { negocio: null, estado: null, zona: null, fechas: null });
+  assert.equal(r.alcance.coleccion, 'eventos'); assert.deepEqual(r.alcance.filtros, { negocio: null, estado: null, zona: null, municipio: null, fechas: null });
   assert.ok(r.alcance.incluye.includes('retirados')); assert.equal(r.alcance.documentosEnColeccion, 1200);
   assert.equal(r.alcance.composicion.retirados, 120); assert.equal(r.alcance.composicion.vigentes, 1080);
   assert.equal(r.barrido.catalogoEstable, true); assert.notEqual(r.traza, (await find(new Store(mk(5)))).traza);

@@ -267,7 +267,7 @@ export function record(e, principal, now=new Date().toISOString()) {
   return {...e,schemaVersion:2,managedBy:'amalia-events-v2',precision_temporal:e.horaDefinida?'fecha_hora':'fecha',fecha_inicio:e.fechaLocal,fecha_fin:e.fechaFinLocal,hora:e.horaLocal,nombre:e.titulo,description:e.descripcion,ubicacion:e.city,town:e.city,place:e.lugar,uidNegocio:e.negocioId,marca:e.marcaId,category:e.categoria,imagen:e.image,enlace_original:e.link,'local-sustainable-tip':e.sustainableTip,'public-transport':e.publicTransport,fechaCreacion:now,fechaActualizacion:now,createdBy:principal.id,agenteCanonico:agenteCanonico(principal.id),updatedBy:agenteCanonico(principal.id),updatedByPrincipal:principal.id,version:1,metrics:{views:0,clicks:0,interactions:0},...geoCampos(e.geoUbicacion)};}
 export function authorize(principal,business,action='read') {
   if (!principal) fail('unauthorized');
-  if (!principal.actions.includes('*') && !principal.actions.includes(action)) fail('forbidden');
+  if (!principal.actions.includes('*') && !principal.actions.includes(action)) fail('forbidden',{accionRequerida:action,ayuda:'Tu token no tiene la acción «'+action+'». Pídesela a Alfred; no es un error de campo.'});
   if (business && !principal.businesses.includes('*') && !principal.businesses.includes(business)) fail('business_forbidden');
 }
 // Admission also permits its preparatory media/private-candidate work, never direct event creation.

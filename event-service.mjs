@@ -1,3 +1,5 @@
+import {clavesDeEvento,claveSesion,decidirSesion,normalizarUrl,sesionesDeEvento} from './clave-sesion.mjs';
+import {encolarRevision,resumenCola} from './cola-revision.mjs';
 import {splitProvenance,prepareProvenance,provenanceProposal,assertReplayProvenance,registryCapabilities} from './registro-provenance.mjs';
 import {ProgramAdmission} from './program-admission.mjs';
 import { escanearDuplicados, informativaPorFuente, motivoSesion, horarioImplicitoDistinto, municipioDistintoAviso, reglaDuplicado, clasificarCoincidencias } from './dedup_amalia.mjs';
@@ -12,7 +14,7 @@ const LOTE_PRESUPUESTO_MS=Number(process.env.AMALIA_LOTE_PRESUPUESTO_MS||38000);
 const UNIVERSE_LOAD_MS=Number(process.env.AMALIA_UNIVERSE_LOAD_MS||40000);
 const UNIVERSE_TTL_MS=Number(process.env.AMALIA_UNIVERSE_TTL_MS||600000);
 export class EventService {
- constructor(store,media,options={}) {this.store=store;this.media=media;this.programs=options.programs||new ProgramAdmission(store);this.inflight=new Map();this.outcomes=new Map();this.registryOptions={cutoff:options.registryCutoff??process.env.AMALIA_FUENTES_V2_DESDE_ISO,now:options.now};if(typeof store.listAll==='function'&&options.warm!==false){const write=store.write.bind(store);store.write=async(...a)=>{const r=await write(...a);if(a[0]==='eventos'){const patched=await this.patchUniverse(a,r).catch(()=>false);if(!patched)setTimeout(()=>this.warm(),0);}return r;};setTimeout(()=>this.warm(),0);}}
+ constructor(store,media,options={}) {this.clavesModo=options.claves??process.env.AMALIA_CLAVES??'off';this.store=store;this.media=media;this.programs=options.programs||new ProgramAdmission(store);this.inflight=new Map();this.outcomes=new Map();this.registryOptions={cutoff:options.registryCutoff??process.env.AMALIA_FUENTES_V2_DESDE_ISO,now:options.now};if(typeof store.listAll==='function'&&options.warm!==false&&this.clavesModo!=='bloquea'){const write=store.write.bind(store);store.write=async(...a)=>{const r=await write(...a);if(a[0]==='eventos'){const patched=await this.patchUniverse(a,r).catch(()=>false);if(!patched)setTimeout(()=>this.warm(),0);}return r;};setTimeout(()=>this.warm(),0);}}
  // Precalienta la caché del catálogo tras cada commit a `eventos`, para que la siguiente preparación no espere la lectura completa.
  // Tras una escritura propia con precondición de guardia (admisión, ediciones con escaneo) nadie más ha escrito entre la guardia leída y este commit:
  // se relee SOLO ese documento y se aplica a la caché en vez de recargar los ~4.000 eventos. Cualquier otra escritura invalida la caché.
@@ -60,7 +62,7 @@ export class EventService {
   return canonicalInput(input);
  }
  async create() {fail('direct_creation_disabled',{use:'preparar_admision y admitir_candidato'});}
- async #createAdmitted(input,principal,guard,program=null,registry=null) {
+ async #createAdmitted(input,principal,guard,program=null,registry=null,extra={}) {
   authorize(principal,input.negocioId,'admit');
   const requestKey=input.requestId ? 'req_'+hash(principal.id+'\0'+input.negocioId+'\0'+input.requestId).slice(0,40) : null;
   const requestFingerprint=fingerprint(input);
@@ -76,12 +78,14 @@ export class EventService {
    }
    reserve={id:rk,data:{eventId,negocioId:e.negocioId,origen:e.origen,actor:agenteCanonico(principal.id),actorPrincipal:principal.id,at:new Date().toISOString()}};
   }
-  const r={...record(e,principal),...program?.record,...(registry?{procedenciaRegistro:registry.record,provenanceHash:registry.hash}:{}),creationFingerprint,requestId:input.requestId || null,...(input.confirmarOtraSesion&&!program?{confirmacionOtraSesion:{eventIds:[...new Set(input.confirmarOtraSesion.eventIds)].sort(),motivo:input.confirmarOtraSesion.motivo,evidenciaUrl:input.confirmarOtraSesion.evidenciaUrl,por:principal.id,en:new Date().toISOString()}}:{})};
-  try {await this.store.write('eventos',eventId,r,{create:true,guard,verifies:[...(program?.verifies||[]),...(registry?[registry.verify]:[])],extras:program?.extras,audit:{version:1,actor:agenteCanonico(principal.id),actorPrincipal:principal.id,action:'created',at:r.fechaCreacion,after:r},request:requestKey?{id:requestKey,data:{eventId,fingerprint:requestFingerprint,actor:agenteCanonico(principal.id),actorPrincipal:principal.id,negocioId:e.negocioId,...(registry?{provenanceHash:registry.hash}: {})}}:undefined,reserve});}
+  const claves=this.clavesModo==='off'?null:{crear:await this.clavesParaCrear(eventId,extra.discriminadorSesion?{...e,discriminadorSesion:extra.discriminadorSesion}:e),borrar:[]};
+  const r={...record(e,principal),...(extra.discriminadorSesion?{discriminadorSesion:extra.discriminadorSesion}:{}),...program?.record,...(registry?{procedenciaRegistro:registry.record,provenanceHash:registry.hash}:{}),creationFingerprint,requestId:input.requestId || null,...(input.confirmarOtraSesion&&!program?{confirmacionOtraSesion:{eventIds:[...new Set(input.confirmarOtraSesion.eventIds)].sort(),motivo:input.confirmarOtraSesion.motivo,evidenciaUrl:input.confirmarOtraSesion.evidenciaUrl,por:principal.id,en:new Date().toISOString()}}:{})};
+  try {await this.store.write('eventos',eventId,r,{create:true,guard,claves,verifies:[...(program?.verifies||[]),...(registry?[registry.verify]:[])],extras:program?.extras,audit:{version:1,actor:agenteCanonico(principal.id),actorPrincipal:principal.id,action:'created',at:r.fechaCreacion,after:r},request:requestKey?{id:requestKey,data:{eventId,fingerprint:requestFingerprint,actor:agenteCanonico(principal.id),actorPrincipal:principal.id,negocioId:e.negocioId,...(registry?{provenanceHash:registry.hash}: {})}}:undefined,reserve});}
   catch(error){if(error.code==='version_conflict'){
    const now=await this.store.get('eventos',eventId);
    if(now?.data.creationFingerprint===creationFingerprint){assertReplayProvenance(now.data,registry);return {created:false,alreadyCreated:true,eventId,...now.data};}
    if(reserve){const held=await this.store.get('amalia_event_reservations',reserve.id);if(held&&held.data.eventId!==eventId)fail('duplicate_event_conflict',{eventId:held.data.eventId,reservaOrigen:reserve.id,revision:true});}
+   if(claves?.crear.length&&this.clavesModo==='bloquea')await this.conflictoClave(claves.crear,eventId);
    }throw error;}
   return {created:true,eventId,...r};
  }
@@ -206,7 +210,129 @@ export class EventService {
   }
   return sesiones;
  }
+ // ---- Claves canónicas por sesión (sesiones_clave) ----
+ // Modo AMALIA_CLAVES: off (sin claves) | sombra (mantiene claves y compara, sin bloquear) | bloquea (decide por claves, sin escaneos completos).
+ async catalogGuard({requireOpen=false}={}) {
+  const guard=await this.store.get('amalia_catalog_guard','eventos');
+  if(!guard?.updateTime || !Number.isSafeInteger(guard.data.epoch) || guard.data.epoch<0 || guard.data.epoch>=Number.MAX_SAFE_INTEGER)fail('catalog_guard_unavailable');
+  if(requireOpen && guard.data.admissionPaused===true)fail('admission_paused');
+  return guard;
+ }
+ async vecinosClaves(municipioFecha){return (await this.store.list('sesiones_clave',{eq:{municipioFecha},limit:500})).map(r=>({...r.data,claveId:r.id}));}
+ /** Comprobación por claves: consultas por municipio+fecha y lecturas puntuales; nunca recorre el catálogo. */
+ async scanPorClaves(e,{eventId=eventIdentity(e)}={}) {
+  const claves=clavesDeEvento(eventId,e),cache=new Map(),bloq=new Map(),cola=new Map();
+  for(const c of claves){
+   let vec=cache.get(c.data.municipioFecha);if(!vec){vec=await this.vecinosClaves(c.data.municipioFecha);cache.set(c.data.municipioFecha,vec);}
+   const prueba=e.prueba===true,cand={...c.data,titulo:e.titulo,tituloOriginal:e.titulo};
+   const d=decidirSesion(cand,vec.filter(v=>v.eventId!==eventId&&(v.prueba===true)===prueba));
+   for(const m of d.motivos){const mapa=m.decision==='bloquea'?bloq:cola,cur=mapa.get(m.eventId)||{eventId:m.eventId,motivos:[],confianza:m.decision==='bloquea'?'exacta':'dudosa',sesion:c.data.fecha};if(!cur.motivos.includes(m.motivo))cur.motivos.push(m.motivo);mapa.set(m.eventId,cur);}
+  }
+  if(e.origen){const held=await this.store.get('amalia_event_reservations',originKey(e.origen));if(held&&held.data.eventId!==eventId){const cur=bloq.get(held.data.eventId)||{eventId:held.data.eventId,motivos:[],confianza:'exacta'};cur.motivos.push('reserva_origen_exacta');bloq.set(held.data.eventId,cur);}}
+  for(const k of bloq.keys())cola.delete(k);
+  const coincidencias=[...bloq.values(),...cola.values()].sort((a,b)=>a.eventId<b.eventId?-1:a.eventId>b.eventId?1:0);
+  const decision=bloq.size?'bloquea':cola.size?'cola':'libre';
+  return {coincidencias,informativas:[],escaneados:0,exhaustivo:true,claves:{modo:this.clavesModo,decision,calculadas:claves.map(c=>({clave:c.data.clave,fuerza:c.data.fuerza})),consultas:cache.size}};
+ }
+ async scanAdmisionFicha(e,input,{requireOpen=false}={}) {
+  if(this.clavesModo==='bloquea'){
+   if(input.confirmarOtraSesion)fail('invalid_field',{campo:'confirmarOtraSesion',ayuda:'Ningún agente puede saltarse un aviso de duplicado. Si crees que es otra sesión distinta, la decisión es de Alfred: queda en la cola revisar_candidatos.'});
+   const guard=await this.catalogGuard({requireOpen});
+   return {guard,scan:await this.scanPorClaves(e)};
+  }
+  const universe=await this.catalogUniverse({requireOpen}),scan=this.scanFicha(e,universe,input.confirmarOtraSesion);
+  if(this.clavesModo==='sombra'){
+   try{const sombra=await this.scanPorClaves(e);scan.clavesSombra={decision:sombra.claves.decision,coincidencias:sombra.coincidencias};console.log(JSON.stringify({event:'claves_sombra',eventId:eventIdentity(e),actual:scan.coincidencias.length?'bloquea':'libre',claves:sombra.claves.decision,coincidenciasClaves:sombra.coincidencias.map(c=>c.eventId)}));}catch(err){console.error(JSON.stringify({event:'claves_sombra_error',error:err?.code||'error'}));}
+  }
+  return {guard:universe.guard,scan};
+ }
+ // Claves de un evento a crear en el mismo commit. En sombra, una clave fuerte ya ocupada se omite (no bloquea); en bloquea el commit falla y se informa del dueño.
+ async clavesParaCrear(eventId,d,{soloLibres=this.clavesModo==='sombra'}={}) {
+  const out=[];
+  for(const c of clavesDeEvento(eventId,d)){if(soloLibres&&await this.store.get('sesiones_clave',c.id))continue;out.push({id:c.id,data:c.data});}
+  return out;
+ }
+ async conflictoClave(claves,eventId) {
+  for(const c of claves){const row=await this.store.get('sesiones_clave',c.id);if(row&&row.data.eventId!==eventId)fail('session_key_conflict',{eventId:row.data.eventId,clave:row.data.clave,estado:'review_required',ayuda:'Esa sesión (municipio, fecha, hora y recinto) ya existe. Usa el eventId devuelto; si es otra actividad distinta, la decisión es de Alfred (cola revisar_candidatos).'});}
+ }
+
+ aliasIdempotencia(o){if(o&&typeof o==='object'&&'idempotencyKey' in o){const {idempotencyKey,...rest}=o;return rest.requestId||!idempotencyKey?rest:{...rest,requestId:idempotencyKey};}return o;}
+
+ /** Fusiona un duplicado en la ficha conservada: rellena sus huecos (fuentes, hora, dirección, imagen, fuenteId), y RETIRA (nunca borra) la otra. */
+ async fusionarPar({conservarId,retirarId,motivo,simular=false},principal) {
+  authorize(principal,null,'retire');authorize(principal,null,'complete');
+  const k=await this.store.get('eventos',id(conservarId)),o=await this.store.get('eventos',id(retirarId));
+  if(!k||!o)fail('event_not_found');if(k.id===o.id)fail('invalid_field',{campo:'retirarId'});
+  if(k.data.retirado===true||o.data.retirado===true)fail('event_retired');
+  const vacio=v=>v==null||v===''||(Array.isArray(v)&&!v.length),url=o.data.fuentes?.[0]?.url||null,campos={};
+  if(Array.isArray(o.data.fuentes)&&o.data.fuentes.length)campos.fuentes=o.data.fuentes;
+  if(vacio(k.data.horaLocal??k.data.hora)&&o.data.horaLocal&&url)campos.horaLocal=o.data.horaLocal;
+  if(vacio(k.data.direccion)&&o.data.direccion)campos.direccion=o.data.direccion;
+  if(vacio(k.data.image??k.data.imagen)&&vacio(k.data.assetId)&&o.data.assetId)campos.assetId=o.data.assetId;
+  const ya=sesionesDeEvento(k.data),pendientes=sesionesDeEvento(o.data).filter(x=>!ya.some(y=>y.fechaLocal===x.fechaLocal&&(y.horaLocal||null)===(x.horaLocal||null)));
+  const plan={conservar:k.id,retirar:o.id,camposAAplicar:Object.keys(campos),moverFuenteId:vacio(k.data.fuenteId)&&!!o.data.fuenteId,sesionesSinMover:pendientes};
+  if(simular)return {simulado:true,escrito:false,...plan};
+  let completado=false;
+  if(Object.keys(campos).length){const out=await this.complete({eventId:k.id,negocioId:k.data.negocioId,expectedVersion:k.data.version||0,campos,motivo:`Fusión: ${motivo}`,evidenciaUrl:url},principal);completado=out.completado;}
+  if(plan.moverFuenteId){const cur=await this.store.get('eventos',k.id);await this.store.write('eventos',k.id,{fuenteId:o.data.fuenteId,fuenteIdAnterior:cur.data.fuenteId??null},{updateTime:cur.updateTime,updateFields:['fuenteId','fuenteIdAnterior'],metadataOnly:true});}
+  const before=await this.store.get('eventos',o.id);
+  await this.retire({eventId:o.id,negocioId:before.data.negocioId,expectedVersion:before.data.version||0,motivo:`Duplicado de ${k.id}: ${motivo}`,codigoConfirmacion:this.confirmationCode(before)},principal);
+  return {...plan,escrito:true,completado,retirada:o.id};
+ }
+
+ async resolverPar(row,{accion,eventIdDestino,motivo,simular},principal) {
+  const {a,b}=row.data,res={accion,por:agenteCanonico(principal.id),porPrincipal:principal.id,en:new Date().toISOString(),motivo:motivo.trim()};
+  const cierra=async(estado,extra={})=>{await this.store.write('revisar_candidatos',row.id,{...row.data,estado,resolucion:{...res,...extra},version:(row.data.version||1)+1},{updateTime:row.updateTime});};
+  if(accion==='admitir_distinta'){if(simular)return {simulado:true,escrito:false,colaId:row.id,efecto:'Marca el par como «son sesiones distintas»: no se toca ninguna ficha.'};await cierra('admitida');return {colaId:row.id,estado:'admitida',nota:'Par confirmado como distinto; no se vuelve a proponer.'};}
+  if(accion==='descartar'){if(simular)return {simulado:true,escrito:false,colaId:row.id,efecto:'Descarta la propuesta sin tocar fichas.'};await cierra('descartada');return {colaId:row.id,estado:'descartada'};}
+  if(![a,b].includes(eventIdDestino))fail('invalid_field',{campo:'eventIdDestino',validos:[a,b]});
+  const retirarId=eventIdDestino===a?b:a,out=await this.fusionarPar({conservarId:eventIdDestino,retirarId,motivo,simular},principal);
+  if(simular)return {...out,colaId:row.id};
+  await cierra('fusionada',{eventIdDestino,retirada:retirarId});return {colaId:row.id,estado:'fusionada',...out};
+ }
+
+ async listarRevision({estado='pendiente',limite=50,cursor}={},principal) {
+  authorize(principal,null,'read');
+  if(!['pendiente','admitida','fusionada','descartada'].includes(estado))fail('invalid_field',{campo:'estado'});
+  const rows=await this.store.list('revisar_candidatos',{estado,cursor,limit:Math.min(Math.max(Number(limite)||50,1),100)});
+  return {items:rows.map(resumenCola),siguiente:rows.length>=Math.min(Math.max(Number(limite)||50,1),100)?rows.at(-1).id:null};
+ }
+ /** Solo Alfred (board_admin). admitir_distinta | fusionar | descartar. simular=true no escribe nada. */
+ async resolverRevision({colaId,accion,eventIdDestino,discriminador,motivo,simular=false},principal) {
+  authorize(principal,null,'board_admin');
+  if(!['admitir_distinta','fusionar','descartar'].includes(accion))fail('invalid_field',{campo:'accion',validos:['admitir_distinta','fusionar','descartar']});
+  if(typeof motivo!=='string'||motivo.trim().length<3||motivo.length>500)fail('reason_required');
+  const row=await this.store.get('revisar_candidatos',id(colaId));if(!row)fail('review_item_not_found');
+  if(row.data.estado!=='pendiente')fail('review_already_resolved',{estado:row.data.estado});
+  if(row.data.tipo==='auditoria_par')return this.resolverPar(row,{accion,eventIdDestino,motivo,simular},principal);
+  const now=new Date().toISOString(),ev=row.data.evento,res={accion,por:agenteCanonico(principal.id),porPrincipal:principal.id,en:now,motivo:motivo.trim()};
+  const cierra=async(estado,extra={})=>{await this.store.write('revisar_candidatos',row.id,{...row.data,estado,resolucion:{...res,...extra},version:(row.data.version||1)+1},{updateTime:row.updateTime});};
+  if(accion==='descartar'){if(simular)return {simulado:true,escrito:false,colaId:row.id,efecto:'Se marcaría como descartada; no se crea ninguna ficha.'};await cierra('descartada');return {colaId:row.id,estado:'descartada'};}
+  if(accion==='fusionar'){
+   if(!eventIdDestino)fail('invalid_field',{campo:'eventIdDestino'});
+   const dest=await this.store.get('eventos',id(eventIdDestino));if(!dest)fail('event_not_found',{eventId:eventIdDestino});if(dest.data.retirado===true)fail('event_retired',{eventId:eventIdDestino});
+   const campos={},url=ev.fuentes?.[0]?.url;
+   if(Array.isArray(ev.fuentes)&&ev.fuentes.length)campos.fuentes=ev.fuentes;
+   if(ev.horaLocal&&!(dest.data.horaLocal??dest.data.hora)&&url)campos.horaLocal=ev.horaLocal;
+   if(ev.direccion&&!dest.data.direccion)campos.direccion=ev.direccion;
+   if(simular)return {simulado:true,escrito:false,colaId:row.id,eventIdDestino,camposAAplicar:Object.keys(campos),efecto:'Rellena solo huecos del existente (completar) y cierra el elemento como fusionado.'};
+   const out=await this.complete({eventId:dest.id,negocioId:dest.data.negocioId,expectedVersion:dest.data.version||0,campos,motivo:`Fusión desde cola ${row.id}: ${res.motivo}`,evidenciaUrl:url||null},principal);
+   await cierra('fusionada',{eventIdDestino});return {colaId:row.id,estado:'fusionada',eventIdDestino,completado:out.completado,aplicados:out.aplicados};
+  }
+  // admitir_distinta
+  const disc=typeof discriminador==='string'&&discriminador.trim()?discriminador.trim().slice(0,80):'';
+  const input={...ev,requestId:'cola-'+row.id};
+  if(simular){const e=await this.canonicalForAdmission(input,principal);const claves=clavesDeEvento(eventIdentity(e),{...e,discriminadorSesion:disc});return {simulado:true,escrito:false,colaId:row.id,eventId:eventIdentity(e),claves:claves.map(c=>({clave:c.data.clave,fuerza:c.data.fuerza})),efecto:'Crearía la ficha como sesión distinta con el discriminador indicado.'};}
+  const gd=await this.catalogGuard({requireOpen:true});
+  let creada;
+  try{creada=await this.#createAdmitted(input,principal,{updateTime:gd.updateTime,epoch:gd.data.epoch},null,null,{discriminadorSesion:disc});}
+  catch(err){if(err.code==='session_key_conflict'&&!disc)fail('discriminador_required',{...err.details,ayuda:'La clave de sesión coincide con otra ficha: indica un discriminador (sala, actividad) que las distinga.'});throw err;}
+  await cierra('admitida',{eventId:creada.eventId,discriminador:disc||null});
+  return {colaId:row.id,estado:'admitida',eventId:creada.eventId,created:creada.created};
+ }
+
  async prepareAdmission(original,principal) {
+  original=this.aliasIdempotencia(original);
   const lote=this.sesionesLote(original);
   if(lote){
    const ses=await this.prepareLote(lote,principal),admisibles=ses.filter(x=>x.admisible).length;
@@ -214,17 +340,18 @@ export class EventService {
   }
   const {content:input,raw}=splitProvenance(original);
   if(input.programa)return this.prepareProgramAdmission(original,principal);
-  const e=await this.canonicalForAdmission(input,principal),universe=await this.catalogUniverse(),scan=this.scanFicha(e,universe,input.confirmarOtraSesion),registry=await this.registryContext(raw,e,principal);
-  return {accionRequerida:'admit',proposalHash:provenanceProposal(this.proposal(e,input,principal,scan),registry),huellaCampos:this.fieldPrints(e,input),eventId:eventIdentity(e),admisible:scan.coincidencias.length===0&&universe.guard.data.admissionPaused!==true,admissionPaused:universe.guard.data.admissionPaused===true,candidato:e,evento:registry?{...input,procedenciaRegistro:registry.input}:input,...scan,persistido:false};
+  const e=await this.canonicalForAdmission(input,principal),{guard:gd,scan}=await this.scanAdmisionFicha(e,input),registry=await this.registryContext(raw,e,principal);
+  return {accionRequerida:'admit',proposalHash:provenanceProposal(this.proposal(e,input,principal,scan),registry),huellaCampos:this.fieldPrints(e,input),eventId:eventIdentity(e),admisible:scan.coincidencias.length===0&&gd.data.admissionPaused!==true,admissionPaused:gd.data.admissionPaused===true,candidato:e,evento:registry?{...input,procedenciaRegistro:registry.input}:input,...scan,persistido:false};
  }
  async admitCandidate(args,principal) {
+  if(args&&args.evento)args={...args,evento:this.aliasIdempotencia(args.evento)};
   const lote=this.sesionesLote(args.evento);if(lote)return this.admitLote(args,lote,principal);
   const rid=splitProvenance(args.evento).content?.requestId,nid=splitProvenance(args.evento).content?.negocioId,mark=rid&&typeof rid==='string'?principal.id+'\0'+rid:null;
   if(mark)this.inflight.set(mark,{negocioId:nid,desde:new Date().toISOString()});
   try{return await this.admitCandidateInner(args,principal);}
   catch(e){
    // El error de siempre (compatibilidad con los scripts) + estado explícito y un recibo consultable: «review_required» (coincidencia que exige revisión humana) o «contended» (escrituras simultáneas, repreparar).
-   if(e instanceof DomainError&&['duplicate_event_conflict','admission_contended'].includes(e.code)){
+   if(e instanceof DomainError&&['duplicate_event_conflict','admission_contended','session_key_conflict','requires_review'].includes(e.code)){
     const estado=e.code==='admission_contended'?'contended':'review_required';
     e.details={...e.details,estado,...(rid?{requestId:rid}:{})};
     if(mark){this.outcomes.set(mark,{estado,codigo:e.code,negocioId:nid,en:new Date().toISOString(),coincidencias:e.details.coincidencias||null,eventId:e.details.eventId||null});while(this.outcomes.size>500)this.outcomes.delete(this.outcomes.keys().next().value);}
@@ -261,10 +388,12 @@ export class EventService {
    if(requestKey){const prior=await this.store.get('amalia_event_requests',requestKey);if(prior){if(prior.data.fingerprint!==fingerprint(input))fail('idempotency_conflict');assertReplayProvenance(prior.data,registry);return {created:false,alreadyCreated:true,...await this.get(prior.data.eventId,input.negocioId,principal)};}}
    const existing=await this.store.get('eventos',eventId);
    if(existing){assertReplayProvenance(existing.data,registry);if(existing.data.retirado===true)fail('event_retired',{eventId});if(existing.data.creationFingerprint===fingerprint(e)){authorize(principal,existing.data.negocioId,'read');return {created:false,alreadyCreated:true,eventId,...existing.data};}fail('duplicate_event_conflict',{eventId,revision:true});}
-   const universe=await this.catalogUniverse({requireOpen:true}),scan=this.scanFicha(e,universe,input.confirmarOtraSesion);
+   if(this.clavesModo==='bloquea'&&!input.requestId)fail('invalid_field',{campo:'requestId',ayuda:'Toda alta lleva una clave de idempotencia: requestId (o idempotencyKey). Repetir la misma llamada devuelve el mismo resultado sin crear nada.'});
+   const {guard:gd,scan}=await this.scanAdmisionFicha(e,input,{requireOpen:true});
+   if(this.clavesModo==='bloquea'&&scan.claves?.decision==='cola'){const q=await encolarRevision(this.store,{e,eventId,input,principal,scan});fail('requires_review',{colaId:q.id,coincidencias:scan.coincidencias,estado:'review_required',revision:true,ayuda:'Posible duplicado dudoso: queda en la cola revisar_candidatos. Solo Alfred decide (admitir como distinta, fusionar en el existente o descartar). No reintentes.'});}
    if(scan.coincidencias.length)fail('duplicate_event_conflict',{coincidencias:scan.coincidencias,revision:true});
    if(provenanceProposal(this.proposal(e,input,principal,scan),registry)!==proposalHash)fail('proposal_changed',{huellaCampos:this.fieldPrints(e,input),ayuda:'Compara huellaCampos con la de preparar_admision: los campos con huella distinta son los que has cambiado. Pasa tal cual el campo evento devuelto y el mismo requestId.'});
-   try{const res=await this.#createAdmitted(input,principal,{updateTime:universe.guard.updateTime,epoch:universe.guard.data.epoch},null,registry);const avisos=(scan.informativas||[]).filter(i=>i.motivos?.includes('posible_duplicado')).map(i=>({tipo:'posible_duplicado',eventId:i.eventId,mensaje:'Existe un evento con nombre muy parecido, misma fecha, lugar y hora. Se ha admitido; revisa si es el mismo.'}));return avisos.length&&res?.created!==false?{...res,avisos}:res;}
+   try{const res=await this.#createAdmitted(input,principal,{updateTime:gd.updateTime,epoch:gd.data.epoch},null,registry);const avisos=(scan.informativas||[]).filter(i=>i.motivos?.includes('posible_duplicado')).map(i=>({tipo:'posible_duplicado',eventId:i.eventId,mensaje:'Existe un evento con nombre muy parecido, misma fecha, lugar y hora. Se ha admitido; revisa si es el mismo.'}));return avisos.length&&res?.created!==false?{...res,avisos}:res;}
    catch(error){if(error.code!=='version_conflict')throw error;if(attempt===2)fail('admission_contended');}
   }
  }
@@ -348,6 +477,7 @@ export class EventService {
  async findDuplicates(input,principal) {
   authorize(principal,null,'read');
   const urls=(input.urls||[]).map(u=>String(u)),sourceIds=(input.sourceIds||[]).map(s=>String(s));
+  const fMun=input.municipio?normalizeText(input.municipio):null,fDesde=input.desde||null,fHasta=input.hasta||null;
   const title=input.titulo?normalizeText(input.titulo):null,city=input.city?normalizeText(input.city):null,fecha=input.fechaLocal||null,sesion=input.sesionId||(fecha?`${fecha}/${input.horaLocal||'sin-hora'}`:null),sesionExplicita=!!input.sesionId;
   let found=new Map();
   const add=(r,motivo)=>{const cur=found.get(r.id)||{row:r,motivos:[]};if(!cur.motivos.includes(motivo))cur.motivos.push(motivo);found.set(r.id,cur);};
@@ -379,6 +509,8 @@ export class EventService {
      const dSourceIds=(d.fuentes||[]).map(s=>s.sourceId).filter(Boolean);
      const dTitulo=normalizeText(leg(d,'titulo','nombre')),dCity=normalizeText(leg(d,'city','ciudad')||(typeof d.ubicacion==='string'?d.ubicacion:d.ubicacion?.municipio));
      const dFecha=leg(d,'fechaLocal','fecha_inicio')||d.dateTime?.slice(0,10)||null;
+     if(fMun&&dCity!==fMun)continue;
+     if((fDesde&&(!dFecha||dFecha<fDesde))||(fHasta&&(!dFecha||dFecha>fHasta)))continue;
      const otraSesion=(fecha&&dFecha&&dFecha!==fecha)||(sesionExplicita&&sesion&&d.sesionId&&d.sesionId!==sesion);
      if(urls.length&&dUrls.some(u=>urls.includes(u)))add(r,otraSesion?'url_fuente_otra_sesion':'url_fuente');
      if(sourceIds.length&&dSourceIds.some(s=>sourceIds.includes(s)))add(r,otraSesion?'source_id_otra_sesion':'source_id');
@@ -404,7 +536,7 @@ export class EventService {
   const {coincidencias,informativas}=clasificarCoincidencias(found.values(),row=>this.identity(row));
   // Igual que la admisión: una reserva de origen cuyo evento ya no existe sigue bloqueando.
   if(huerfana)coincidencias.push(huerfana);
-  const fin=new Date().toISOString(),alcance={coleccion:'eventos',filtros:{negocio:null,estado:null,zona:null,fechas:null},incluye:['capturados','retirados','cancelados','pasados','legacy'],excluidoDeLaComparacion:omitidasPrueba?{prueba:omitidasPrueba}:{},limite,documentosEnColeccion:escaneados,composicion:estado,reservasOrigen:input.origen?'consultada':'no_aplica'};
+  const fin=new Date().toISOString(),alcance={coleccion:'eventos',filtros:{negocio:null,estado:null,zona:null,municipio:input.municipio||null,fechas:fDesde||fHasta?{desde:fDesde,hasta:fHasta}:null},incluye:['capturados','retirados','cancelados','pasados','legacy'],excluidoDeLaComparacion:omitidasPrueba?{prueba:omitidasPrueba}:{},limite,documentosEnColeccion:escaneados,composicion:estado,reservasOrigen:input.origen?'consultada':'no_aplica'};
   return {coincidencias,informativas,escaneados,exhaustivo,...(motivoParcial?{motivoParcial}:{}),traza,alcance,barrido:{inicio,fin,intentos,catalogoEstable:!!(guardAntes&&guardAntes===guardDespues)},nota:'REGLA 2.18.0: solo es duplicado (bloquea) lo que coincide en nombre normalizado (minusculas, sin tildes ni signos), fecha, lugar (recinto y municipio) y hora (o falta en uno de los dos); ademas bloquean la reserva de origen y la identidad calculada. confianza=posible_duplicado (en informativas): nombre muy parecido con misma fecha, lugar y hora; no bloquea, revisalo. Cualquier otra señal (URL, sourceId, sesion, titulo contenido) es informativa y no bloquea. alcance describe el barrido: sin filtros, todos los documentos de eventos; el tamaño varia porque otros procesos (p. ej. la sincronizacion de Fever) añaden y borran documentos sin pasar por el MCP; traza localiza el barrido en los logs. Si exhaustivo=false (motivoParcial indica por que) hay registros sin revisar: detén la creación e informa.'};
  }
  async update({eventId,negocioId,expectedVersion,changes,reason,evidenciaUrl=null,simular=false},principal) {
@@ -473,22 +605,30 @@ export class EventService {
    let guard;
    if(SCAN.some(k=>k in ch)){
     // Mismo protocolo que la admisión: escaneo exhaustivo contra los demás eventos y commit atómico con la guardia.
-    const universe=await this.catalogUniverse(),scan=this.scanAdmission(e,{...universe,docs:universe.docs.filter(r=>r.id!==eventId),reservas:universe.reservas.filter(r=>r.eventId!==eventId)});
-    if(scan.coincidencias.length)fail('duplicate_event_conflict',{coincidencias:scan.coincidencias,revision:true});
-    guard={updateTime:universe.guard.updateTime};
+    if(this.clavesModo==='bloquea'){
+     const scan=await this.scanPorClaves(e,{eventId});
+     if(scan.coincidencias.length)fail('duplicate_event_conflict',{coincidencias:scan.coincidencias,revision:true});
+     guard={updateTime:(await this.catalogGuard()).updateTime};
+    }else{
+     const universe=await this.catalogUniverse(),scan=this.scanAdmission(e,{...universe,docs:universe.docs.filter(r=>r.id!==eventId),reservas:universe.reservas.filter(r=>r.eventId!==eventId)});
+     if(scan.coincidencias.length)fail('duplicate_event_conflict',{coincidencias:scan.coincidencias,revision:true});
+     guard={updateTime:universe.guard.updateTime};
+    }
    }
    if(simular){
     const diff=Object.fromEntries(updateFields.filter(k=>JSON.stringify(old[k]??null)!==JSON.stringify(after[k]??null)).map(k=>[k,{antes:old[k]??null,despues:after[k]??null}]));
     return {simulado:true,escrito:false,eventId,versionActual:old.version||0,versionResultante:after.version,camposQueCambian:Object.keys(diff),cambios:diff,duplicadosComprobados:SCAN.some(k=>k in ch),siguientePaso:`Repite sin simular (o con simular=false), con expectedVersion=${old.version||0} y los mismos changesJson/reason. Nada se ha escrito.`};
    }
    try{
-    await this.store.write('eventos',eventId,after,{updateTime:before.updateTime,updateFields,guard,moveReserve:reserveMove,audit:{version:after.version,actor:agenteCanonico(principal.id),actorPrincipal:principal.id,action:mode==='complete'?'completed':'updated',reason,evidenciaUrl:evidenciaUrl||null,at:now,before:old,after}});
-   }catch(error){if(error.code==='version_conflict'&&attempt<2){const cur=await this.store.get('eventos',eventId);if(cur&&(cur.data.version||0)===expectedVersion)continue;}throw error;}
+    let clavesEdicion=null;
+    if(this.clavesModo!=='off'){const oldK=clavesDeEvento(eventId,old),newK=clavesDeEvento(eventId,after),oldIds=new Set(oldK.map(k=>k.id)),newIds=new Set(newK.map(k=>k.id));let crear=newK.filter(k=>!oldIds.has(k.id));if(this.clavesModo==='sombra'){const libres=[];for(const k of crear)if(!await this.store.get('sesiones_clave',k.id))libres.push(k);crear=libres;}clavesEdicion={crear:crear.map(k=>({id:k.id,data:k.data})),borrar:oldK.filter(k=>!newIds.has(k.id)).map(k=>k.id)};}
+    await this.store.write('eventos',eventId,after,{updateTime:before.updateTime,updateFields,guard,claves:clavesEdicion,moveReserve:reserveMove,audit:{version:after.version,actor:agenteCanonico(principal.id),actorPrincipal:principal.id,action:mode==='complete'?'completed':'updated',reason,evidenciaUrl:evidenciaUrl||null,at:now,before:old,after}});
+   }catch(error){if(error.code==='version_conflict'&&this.clavesModo==='bloquea'&&clavesEdicion?.crear.length)await this.conflictoClave(clavesEdicion.crear,eventId);if(error.code==='version_conflict'&&attempt<2){const cur=await this.store.get('eventos',eventId);if(cur&&(cur.data.version||0)===expectedVersion)continue;}throw error;}
    return {eventId,...after};
   }
  }
  /** Rellena SOLO huecos: nunca sobrescribe ni borra un valor existente. Acción `complete`. */
- async complete({eventId,negocioId,expectedVersion,campos,motivo,evidenciaUrl=null},principal) {
+ async complete({eventId,negocioId,expectedVersion,campos,motivo,evidenciaUrl=null,simular=false},principal) {
   authorize(principal,negocioId,'complete');
   const row=await this.store.get('eventos',id(eventId));if(!row)fail('event_not_found');if(row.data.negocioId!==negocioId)fail('business_forbidden');
   const d=row.data,apply={},omitidos=[];
@@ -512,7 +652,8 @@ export class EventService {
    }
   }
   if(!Object.keys(apply).length)return {completado:false,eventId,version:d.version||0,aplicados:[],omitidos,nota:'No había huecos que rellenar: no se ha escrito nada.'};
-  const out=await this.#applyEdit({eventId,negocioId,expectedVersion,changes:apply,reason:motivo,evidenciaUrl,mode:'complete'},principal);
+  const out=await this.#applyEdit({eventId,negocioId,expectedVersion,changes:apply,reason:motivo,evidenciaUrl,mode:'complete',simular},principal);
+  if(out.simulado)return {...out,completado:false,aplicarian:Object.keys(apply),omitidos};
   return {completado:true,eventId,version:out.version,aplicados:Object.keys(apply),omitidos};
  }
  identity(r){const d=r.data;return {eventId:r.id,negocioId:d.negocioId,titulo:d.titulo||d.nombre||null,fechaLocal:d.fechaLocal||d.fecha_inicio||null,horarioTexto:d.horarioTexto||d.hora||null,ciudad:d.city||d.ciudad||null,lugar:d.lugar||null,sesionId:d.sesionId||null,verificationStatus:d.verificationStatus||null,prueba:d.prueba===true,version:d.version||0,fuentes:(d.fuentes||[]).map(s=>s.url).slice(0,3),creadoPor:d.createdBy||null,creadoEn:d.fechaCreacion||null,retirado:d.retirado===true};}
@@ -532,7 +673,8 @@ export class EventService {
   const now=new Date().toISOString(),version=expectedVersion+1,old=before.data;
   const patch={retirado:true,retiradoPor:agenteCanonico(principal.id),retiradoPorPrincipal:principal.id,retiradoEn:now,retiradoMotivo:motivo.trim(),retiradoVersion:expectedVersion,estadoAnterior:old.estado ?? null,activaAnterior:old.activa ?? null,estado:'retirado',activa:false,version,updatedBy:agenteCanonico(principal.id),updatedByPrincipal:principal.id,fechaActualizacion:now};
   if(programResolution)patch.programAncestorResolution=programResolution.resolution;
-  await this.store.write('eventos',eventId,patch,{updateTime:before.updateTime,guard:programResolution?.guard,verifies:programResolution?.verifies,extras:programResolution?.extras,updateFields:Object.keys(patch),audit:{version,actor:agenteCanonico(principal.id),actorPrincipal:principal.id,action:'retired',reason:patch.retiradoMotivo,at:now,before:{retirado:false,estado:old.estado ?? null,activa:old.activa ?? null,version:expectedVersion},after:patch}});
+  const clavesRetiro=this.clavesModo==='off'?null:{crear:[],borrar:clavesDeEvento(eventId,old).map(k=>k.id)};
+  await this.store.write('eventos',eventId,patch,{updateTime:before.updateTime,claves:clavesRetiro,guard:programResolution?.guard,verifies:programResolution?.verifies,extras:programResolution?.extras,updateFields:Object.keys(patch),audit:{version,actor:agenteCanonico(principal.id),actorPrincipal:principal.id,action:'retired',reason:patch.retiradoMotivo,at:now,before:{retirado:false,estado:old.estado ?? null,activa:old.activa ?? null,version:expectedVersion},after:patch}});
   return {eventId,...old,...patch};
  }
  async restorePreview({eventId,negocioId},principal) {
@@ -551,7 +693,8 @@ export class EventService {
   if(old.estadoAnterior!=null)patch.estado=old.estadoAnterior;
   if(old.activaAnterior!=null)patch.activa=old.activaAnterior;
   const mask=[...fields,'estado','activa'];
-  await this.store.write('eventos',eventId,patch,{updateTime:before.updateTime,updateFields:mask,audit:{version,actor:agenteCanonico(principal.id),actorPrincipal:principal.id,action:'restored',reason:patch.recuperadoMotivo,at:now,before:{retirado:true,retiradoPor:old.retiradoPor ?? null,retiradoEn:old.retiradoEn ?? null,version:expectedVersion},after:patch}});
+  const clavesRestauro=this.clavesModo==='off'?null:{crear:await this.clavesParaCrear(eventId,{...old,...patch}),borrar:[]};
+  try{await this.store.write('eventos',eventId,patch,{updateTime:before.updateTime,updateFields:mask,claves:clavesRestauro,audit:{version,actor:agenteCanonico(principal.id),actorPrincipal:principal.id,action:'restored',reason:patch.recuperadoMotivo,at:now,before:{retirado:true,retiradoPor:old.retiradoPor ?? null,retiradoEn:old.retiradoEn ?? null,version:expectedVersion},after:patch}});}catch(error){if(error.code==='version_conflict'&&this.clavesModo==='bloquea'&&clavesRestauro?.crear.length)await this.conflictoClave(clavesRestauro.crear,eventId);throw error;}
   const after={eventId,...old,...patch};if(!('estado' in patch))delete after.estado;if(!('activa' in patch))delete after.activa;return after;
  }
  async history(eventId,businessId,principal){await this.get(eventId,businessId,principal);return {eventId,revisiones:await this.store.revisions(eventId)};}
