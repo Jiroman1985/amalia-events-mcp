@@ -38,7 +38,7 @@ export class FirestoreStore {
     const r=await this.fetch(u,{...options,headers:{'content-type':'application/json',...await this.auth(),...options.headers},signal:AbortSignal.timeout(15000)});
     if(r.status===404){if((options.method||'GET')!=='GET')fail('firestore_http_404');return null;}
     if([409,412].includes(r.status))fail('version_conflict');
-    if(!r.ok){const detail=await r.json().catch(()=>({}));if(['FAILED_PRECONDITION','ABORTED','ALREADY_EXISTS'].includes(detail.error?.status))fail('version_conflict');throw new DomainError(`firestore_http_${r.status}`);}
+    if(!r.ok){const detail=await r.json().catch(()=>({}));if(['FAILED_PRECONDITION','ABORTED','ALREADY_EXISTS'].includes(detail.error?.status))fail('version_conflict');throw new DomainError(`firestore_http_${r.status}`,{operacion:(options.method||'GET')+' '+path.split('?')[0].replace(/\/[^/]+$/,'/…'),estadoFirestore:detail.error?.status||null,ayuda:r.status===403?'La cuenta de servicio no tiene permiso para esta operación en Firestore (p. ej. borrar documentos).':undefined});}
     return r.json();
   }
   async get(collection,key) { const d=await this.request(`/${collection}/${id(key)}`);return d?{id:key,data:decodeFields(d.fields),updateTime:d.updateTime}:null; }
@@ -75,6 +75,27 @@ export class FirestoreStore {
     const out=[],seen=new Set();for(const rows of parts)for(const row of rows){if(seen.has(row.id))fail('incomplete_scan');seen.add(row.id);out.push(row);}
     return out;
   }
+  // Claves de sesión (sesiones_clave) en el MISMO commit que el evento. La cuenta de servicio NO puede borrar documentos (403): liberar una clave es una ACTUALIZACIÓN (estado:'liberada') con precondición de versión.
+  // crear exige que no exista; actualizar exige el updateTime leído (nadie la tocó entretanto).
+  clavesWrites(writes,claves,permitido=true) {
+    if(!claves||!permitido)return;
+    for(const c of claves.crear||[])writes.push({update:{name:`${this.prefix}/sesiones_clave/${id(c.id)}`,fields:toFirestoreFields(c.data)},currentDocument:{exists:false}});
+    for(const c of claves.actualizar||[]){if(!c.updateTime)fail('clave_version_missing');writes.push({update:{name:`${this.prefix}/sesiones_clave/${id(c.id)}`,fields:toFirestoreFields(c.data)},currentDocument:{updateTime:c.updateTime}});}
+  }
+  // Varios documentos de `eventos` (con auditoría) y sus claves en UN solo commit atómico, con la guardia movida una vez. Cada item: {key,data,updateTime,updateFields,audit}.
+  async writeMany(items,{guard,claves}={}) {
+    if(!Array.isArray(items)||!items.length)fail('invalid_field',{campo:'items'});
+    const writes=[],mask=fs=>({fieldPaths:fs.map(k=>/^[A-Za-z_][A-Za-z0-9_]*$/.test(k)?k:'`'+k.replaceAll('\\','\\\\').replaceAll('`','\\`')+'`')});
+    for(const it of items){
+      writes.push({update:{name:`${this.prefix}/eventos/${id(it.key)}`,fields:toFirestoreFields(it.data)},updateMask:mask(it.updateFields),currentDocument:{updateTime:it.updateTime}});
+      if(it.audit)writes.push({update:{name:`${this.prefix}/eventos/${id(it.key)}/revisiones/v${String(it.data.version).padStart(8,'0')}`,fields:toFirestoreFields(it.audit)},currentDocument:{exists:false}});
+    }
+    this.clavesWrites(writes,claves);
+    if(writes.length>499)fail('program_commit_limit');
+    writes.push(buildGuardWrite(this.prefix,guard||{}));
+    const r=await this.request(':commit',{method:'POST',body:JSON.stringify({writes})});
+    return {escritos:items.map(it=>it.key),resultados:r.writeResults?.length||0};
+  }
   async write(collection,key,data,{updateTime,create=false,audit,request,reserve,updateFields,guard,verifies=[],extras=[],moveReserve=null,metadataOnly=false,claves=null}={}) {
     // Excepción acotada a la invariante «todo commit de eventos mueve la guardia»: metadatos de auditoría que no afectan a duplicados (solo agenteCanonico, sobre un documento existente).
     if(metadataOnly&&!(collection==='eventos'&&!create&&Array.isArray(updateFields)&&updateFields.length>0&&updateFields.every(f=>METADATOS_EVENTO.has(f))))fail('metadata_write_forbidden');
@@ -85,8 +106,7 @@ export class FirestoreStore {
     if(request)writes.push({update:{name:`${this.prefix}/amalia_event_requests/${id(request.id)}`,fields:toFirestoreFields(request.data)},currentDocument:{exists:false}});
     if(reserve)writes.push({update:{name:`${this.prefix}/amalia_event_reservations/${id(reserve.id)}`,fields:toFirestoreFields(reserve.data)},currentDocument:{exists:false}});
     if(moveReserve){writes.push({delete:`${this.prefix}/amalia_event_reservations/${id(moveReserve.from)}`,currentDocument:{exists:true}});writes.push({update:{name:`${this.prefix}/amalia_event_reservations/${id(moveReserve.to.id)}`,fields:toFirestoreFields(moveReserve.to.data)},currentDocument:{exists:false}});}
-    // Claves de sesión (sesiones_clave): se crean/borran en el MISMO commit atómico que el evento; crear exige que no existan (exists:false).
-    if(claves&&collection==='eventos'){for(const c of claves.crear||[])writes.push({update:{name:`${this.prefix}/sesiones_clave/${id(c.id)}`,fields:toFirestoreFields(c.data)},currentDocument:{exists:false}});for(const k of claves.borrar||[])writes.push({delete:`${this.prefix}/sesiones_clave/${id(k)}`});}
+    this.clavesWrites(writes,claves,collection==='eventos');
     const uniqueVerifies=new Map();for(const v of verifies){const name=v.collection+'/'+v.key,prior=uniqueVerifies.get(name);if(prior&&prior.updateTime!==v.updateTime)fail('version_conflict');uniqueVerifies.set(name,v);}
     for(const v of uniqueVerifies.values()){if(!v.updateTime)fail('program_document_version_missing');writes.push({verify:`${this.prefix}/${id(v.collection)}/${id(v.key)}`,currentDocument:{updateTime:v.updateTime}});}
     for(const x of extras){if(!['amalia_program_snapshots','amalia_program_sessions'].includes(x.collection))fail('program_extra_write_forbidden');writes.push({update:{name:`${this.prefix}/${x.collection}/${id(x.key)}`,fields:toFirestoreFields(x.data)},currentDocument:{exists:false}});}

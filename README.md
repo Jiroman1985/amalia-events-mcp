@@ -157,3 +157,10 @@ Pruebas reproducibles: `FIRESTORE_EMULATOR_HOST=127.0.0.1:8686 AMALIA_TEST_PUBLI
 - `forbidden` incluye `accionRequerida`; herramientas de escritura y `buscar_duplicados_global` rechazan campos desconocidos (error con el nombre del campo); `buscar_duplicados_global` acepta `municipio`, `desde`, `hasta`; `simular` en admitir_candidato, completar_evento, retirar_evento, resolver_revision_candidato.
 - Scripts: `rellenar_claves.mjs` (backfill/reconciliación, ensayo + `--aplicar --confirmo`), `auditoria_duplicados.mjs` (propone; `--encolar`, `--guardar`; `--retirar` es la fase 2, solo con aprobación).
 - Tests: `tests/claves-duplicados.test.mjs` (casos reales y concurrencia de 5 altas simultáneas: entra una).
+
+## 2.25.2 — correcciones de la revisión (SIGUE EN SOMBRA)
+
+- Las claves **no se borran** nunca (la cuenta de servicio de Firestore no puede borrar: 403): se **liberan** (`estado:'liberada'`, con precondición de versión) y se retoman. Solo se tocan claves propias (`eventId` igual): retirar un duplicado ya no afecta a la clave de la ficha que se queda.
+- `fusionarPar` es **un solo commit atómico** (`FirestoreStore.writeMany`): rellena huecos de la conservada, **mueve las sesiones** que solo tenía la otra, retira la otra y traspasa/libera las claves. `simular` devuelve campos, sesiones, claves y conflictos y comprueba permisos. Ya no pasa por el escaneo de duplicados (adiós `duplicate_event_conflict` contra el propio par).
+- Municipio con alias (`Lumbier/Irunberri`, `Donostia`/`San Sebastián`…, tabla ampliable en `clave-sesion.mjs`); una clave por **día** en rangos `fechaLocal`–`fechaFinLocal` (hasta 31 días); el tipo de recinto (teatro, auditorio, museo, iglesia, plaza…) ya no se quita; fecha/hora de eventos antiguos desde `dateTime` en hora de Madrid.
+- `rellenar_claves.mjs`: lo que sobra se libera, no se borra.

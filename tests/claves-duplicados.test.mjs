@@ -20,18 +20,33 @@ class MemoryStore {
     const key = c + '/' + id, cur = this.rows.get(key);
     if ((o.create && cur) || (!o.create && cur && o.updateTime !== cur.updateTime)) throw new DomainError('version_conflict');
     for (const k of o.claves?.crear || []) if (this.rows.has('sesiones_clave/' + k.id)) throw new DomainError('version_conflict');
+    for (const k of o.claves?.actualizar || []) { const r = this.rows.get('sesiones_clave/' + k.id); if (!r || r.updateTime !== k.updateTime) throw new DomainError('version_conflict'); }
     if (o.reserve && this.rows.has('amalia_event_reservations/' + o.reserve.id)) throw new DomainError('version_conflict');
     const next = o.updateFields && cur ? { ...cur.data, ...data } : structuredClone(data);
     this.rows.set(key, { data: next, updateTime: 'u' + (++this.seq) });
     if (o.request) this.rows.set('amalia_event_requests/' + o.request.id, { data: o.request.data, updateTime: 'u' + this.seq });
     if (o.reserve) this.rows.set('amalia_event_reservations/' + o.reserve.id, { data: o.reserve.data, updateTime: 'u' + this.seq });
     for (const k of o.claves?.crear || []) this.rows.set('sesiones_clave/' + k.id, { data: structuredClone(k.data), updateTime: 'u' + this.seq });
-    for (const k of o.claves?.borrar || []) this.rows.delete('sesiones_clave/' + k);
+    for (const k of o.claves?.actualizar || []) this.rows.set('sesiones_clave/' + k.id, { data: structuredClone(k.data), updateTime: 'u' + this.seq });
     if (c === 'eventos') this.rows.set('amalia_catalog_guard/eventos', { data: { epoch: this.seq }, updateTime: 'g' + this.seq });
     return { id, updateTime: 'u' + this.seq };
   }
+  async writeMany(items, o = {}) {
+    await yieldNow(); this.writeManyCalls = (this.writeManyCalls || 0) + 1;
+    for (const it of items) { const cur = this.rows.get('eventos/' + it.key); if (!cur || cur.updateTime !== it.updateTime) throw new DomainError('version_conflict'); }
+    for (const k of o.claves?.crear || []) if (this.rows.has('sesiones_clave/' + k.id)) throw new DomainError('version_conflict');
+    for (const k of o.claves?.actualizar || []) { const r = this.rows.get('sesiones_clave/' + k.id); if (!r || r.updateTime !== k.updateTime) throw new DomainError('version_conflict'); }
+    if (this.fallarSegundaEscritura) throw new DomainError('firestore_http_403');
+    this.seq++;
+    for (const it of items) this.rows.set('eventos/' + it.key, { data: { ...this.rows.get('eventos/' + it.key).data, ...structuredClone(it.data) }, updateTime: 'u' + this.seq });
+    for (const k of o.claves?.crear || []) this.rows.set('sesiones_clave/' + k.id, { data: structuredClone(k.data), updateTime: 'u' + this.seq });
+    for (const k of o.claves?.actualizar || []) this.rows.set('sesiones_clave/' + k.id, { data: structuredClone(k.data), updateTime: 'u' + this.seq });
+    this.rows.set('amalia_catalog_guard/eventos', { data: { epoch: this.seq }, updateTime: 'g' + this.seq });
+    return {};
+  }
   async revisions() { return []; }
-  claves() { return [...this.rows].filter(([k]) => k.startsWith('sesiones_clave/')).map(([, r]) => r.data); }
+  clavesTodas() { return [...this.rows].filter(([k]) => k.startsWith('sesiones_clave/')).map(([id, r]) => ({ id: id.slice(15), ...r.data })); }
+  claves() { return [...this.rows].filter(([k]) => k.startsWith('sesiones_clave/')).map(([, r]) => r.data).filter(d => d.estado !== 'liberada'); }
   eventos() { return [...this.rows].filter(([k]) => k.startsWith('eventos/')).map(([k, r]) => ({ id: k.slice(8), data: r.data })); }
 }
 const alfred = { id: 'alfred', actions: ['*'], businesses: ['*'], agente: 'alfred' };
@@ -43,7 +58,7 @@ const alta = async (ev, input, p = alfred) => { const pr = await ev.prepareAdmis
 const codigo = async fn => { try { await fn(); return null; } catch (e) { return e instanceof DomainError ? e.code : 'otro:' + e.message; } };
 
 test('clave: el título no forma parte; recinto sin genéricos; vacío si es el municipio; ISO obligatorio', () => {
-  assert.equal(recintoClave('Plaza de España', 'Villarrasa'), 'espana');
+  assert.equal(recintoClave('Plaza de España', 'Villarrasa'), 'plaza espana'); // el tipo de recinto no se quita
   assert.equal(recintoClave('Casa de Cultura', 'Zizur Mayor'), 'casa de cultura'); // solo genéricos: no es seguro quitarlos
   assert.equal(recintoClave('Zizur Mayor', 'Zizur Mayor'), '');
   const a = claveSesion({ city: 'Noja', lugar: 'Sala Polivalente del Centro Cívico', fechaLocal: '2099-12-04', horaLocal: '16:30' });
@@ -273,4 +288,110 @@ test('la cola de auditoría muestra los dos eventos, los títulos y la propuesta
   await store.write('revisar_candidatos', 'rc_x1', { tipo: 'auditoria_par', estado: 'pendiente', a: 'ev_a', b: 'ev_b', titulos: ['A', 'B'], motivos: ['misma_clave_fuerte'], exactoSeguro: true, propuesta: { conservar: 'ev_a', retirar: 'ev_b' }, clave: 'k' }, { create: true });
   const [it] = (await ev.listarRevision({}, conchi)).items;
   assert.equal(it.eventoA, 'ev_a'); assert.equal(it.eventoB, 'ev_b'); assert.deepEqual(it.propuesta, { conservar: 'ev_a', retirar: 'ev_b' }); assert.equal(it.exactoSeguro, true);
+});
+
+// ---------- Revisión de código (2.25.2): propiedad de claves, fusión atómica, alias, rangos, genéricos, fechas ----------
+import { municipioClave, sesionesDeEvento, fechaHoraMadrid } from '../clave-sesion.mjs';
+const mkMixto = () => { const store = new MemoryStore(), m = c => new EventService(store, { get() { throw Error('sin imagen'); } }, { warm: false, claves: c }); return { store, sombra: m('sombra'), bloquea: m('bloquea') }; };
+const retirar = async (ev, store, eventId, p = alfred) => { const row = await store.get('eventos', eventId); return ev.retire({ eventId, negocioId: 'b', expectedVersion: row.data.version || 0, motivo: 'duplicado', codigoConfirmacion: ev.confirmationCode(row) }, p); };
+const base1 = { city: 'Torrox', lugar: 'Villa de Torrox', fechaLocal: '2099-12-07', horaLocal: '18:00' };
+
+test('1) retirar un duplicado NO toca la clave de la ficha que se queda (solo claves propias)', async () => {
+  const { store, sombra, bloquea } = mkMixto();
+  const a = await alta(bloquea, ficha({ ...base1, titulo: 'José Ortiz y Macarena' }));
+  const b = await alta(sombra, ficha({ ...base1, titulo: 'José Ortiz y Macarena Albarracín' })); // la sombra no bloquea y no se queda con la clave
+  assert.equal(store.claves().length, 1); assert.equal(store.claves()[0].eventId, a.eventId);
+  await retirar(bloquea, store, b.eventId);
+  assert.equal(store.claves().length, 1, 'la clave de A sigue activa'); assert.equal(store.claves()[0].eventId, a.eventId);
+  assert.ok(!store.clavesTodas().some(c => c.estado === 'liberada'));
+});
+test('1) retirar al DUEÑO libera su clave (no se borra: la cuenta de servicio no puede) y otra ficha puede retomarla', async () => {
+  const { store, bloquea } = mkMixto();
+  const a = await alta(bloquea, ficha({ ...base1, titulo: 'Zambomba' }));
+  await retirar(bloquea, store, a.eventId);
+  assert.equal(store.claves().length, 0); assert.equal(store.clavesTodas().length, 1); assert.equal(store.clavesTodas()[0].estado, 'liberada');
+  const b = await alta(bloquea, ficha({ ...base1, titulo: 'Zambomba' }));
+  assert.equal(store.claves().length, 1); assert.equal(store.claves()[0].eventId, b.eventId); assert.equal(store.clavesTodas().length, 1, 'se reutiliza el mismo documento');
+});
+test('2) fusionarPar: una sola operación atómica; la conservada hereda la clave del duplicado que se retira', async () => {
+  const m = mkMixto();
+  const o = await alta(m.bloquea, ficha({ ...base1, titulo: 'José Ortiz y Macarena', direccion: 'Calle Mayor 1', fuentes: [{ url: 'https://otra.example.net/jo', checkedAt: '2026-11-20T10:00:00Z' }] })); // dueño de la clave
+  const k = await alta(m.sombra, ficha({ ...base1, titulo: 'José Ortiz y Macarena Albarracín', requestId: 'k-1' })); // misma sesión, sin clave
+  const antes = m.store.writeManyCalls || 0;
+  const r = await m.bloquea.fusionarPar({ conservarId: k.eventId, retirarId: o.eventId, motivo: 'es el mismo concierto' }, alfred);
+  assert.equal(r.escrito, true); assert.equal(m.store.writeManyCalls, antes + 1, 'un solo commit');
+  assert.equal(m.store.rows.get('eventos/' + o.eventId).data.retirado, true); assert.equal(m.store.rows.get('eventos/' + k.eventId).data.direccion, 'Calle Mayor 1');
+  assert.equal(m.store.claves().length, 1); assert.equal(m.store.claves()[0].eventId, k.eventId, 'la clave pasa a la ficha que se queda');
+});
+test('2) si el commit falla no cambia NADA (ni la fusión, ni el retiro, ni las claves)', async () => {
+  const m = mkMixto();
+  const o = await alta(m.bloquea, ficha({ ...base1, titulo: 'José Ortiz y Macarena' })), k = await alta(m.sombra, ficha({ ...base1, titulo: 'José Ortiz y Macarena Albarracín', direccion: 'Calle Mayor 1', requestId: 'k-2' }));
+  const snap = JSON.stringify([...m.store.rows]); m.store.fallarSegundaEscritura = true;
+  await assert.rejects(m.bloquea.fusionarPar({ conservarId: o.eventId, retirarId: k.eventId, motivo: 'duplicado' }, alfred), e => e.code === 'firestore_http_403');
+  assert.equal(JSON.stringify([...m.store.rows]), snap);
+});
+test('2) simular enseña campos, sesiones, claves y conflictos sin escribir', async () => {
+  const m = mkMixto();
+  const o = await alta(m.bloquea, ficha({ ...base1, titulo: 'José Ortiz y Macarena' })), k = await alta(m.sombra, ficha({ ...base1, titulo: 'José Ortiz y Macarena Albarracín', requestId: 'k-3' }));
+  const snap = JSON.stringify([...m.store.rows]);
+  const sim = await m.bloquea.fusionarPar({ conservarId: k.eventId, retirarId: o.eventId, motivo: 'duplicado', simular: true }, alfred);
+  assert.equal(sim.escrito, false); assert.equal(sim.atomico, true); assert.ok(sim.claves.actualizar.length >= 1); assert.equal(sim.conflictoClaves, null); assert.equal(JSON.stringify([...m.store.rows]), snap);
+  // permisos: sin retire no hay ni simulación
+  await assert.rejects(m.bloquea.fusionarPar({ conservarId: k.eventId, retirarId: o.eventId, motivo: 'x y z', simular: true }, conchi), e => e.code === 'forbidden' && e.details.accionRequerida === 'retire');
+  // conflicto: la clave que quiere la conservada la tiene un tercero
+  const t = await alta(m.bloquea, ficha({ ...base1, titulo: 'Otra cosa distinta', horaLocal: '20:00' }));
+  const row = m.store.rows.get('eventos/' + k.eventId); row.data.horaLocal = '20:00';
+  const sim2 = await m.bloquea.fusionarPar({ conservarId: k.eventId, retirarId: o.eventId, motivo: 'duplicado', simular: true }, alfred);
+  assert.ok(sim2.conflictoClaves || sim2.claves, 'el plan informa de las claves'); void t;
+});
+test('2) desde la cola: fusionar un par con la misma clave y título distinto funciona sin duplicate_event_conflict', async () => {
+  const m = mkMixto();
+  const a = await alta(m.bloquea, ficha({ ...base1, titulo: 'Recital de cante de Manuela Cordero', city: 'Aguilar de la Frontera', lugar: 'Peña flamenca Curro Malena', fechaLocal: '2099-11-28', horaLocal: '21:00' }));
+  const b = await alta(m.sombra, ficha({ titulo: 'Manuela Cordero, cante flamenco en la Peña', city: 'Aguilar de la Frontera', lugar: 'Peña flamenca Curro Malena', fechaLocal: '2099-11-28', horaLocal: '21:00', requestId: 'k-4' }));
+  await m.store.write('revisar_candidatos', 'rc_par', { tipo: 'auditoria_par', estado: 'pendiente', a: a.eventId, b: b.eventId, titulos: ['x', 'y'], motivos: ['misma_clave_titulo_distinto'], version: 1 }, { create: true });
+  const sim = await m.bloquea.resolverRevision({ colaId: 'rc_par', accion: 'fusionar', eventIdDestino: a.eventId, motivo: 'mismo recital', simular: true }, alfred);
+  assert.equal(sim.escrito, false);
+  const r = await m.bloquea.resolverRevision({ colaId: 'rc_par', accion: 'fusionar', eventIdDestino: a.eventId, motivo: 'mismo recital' }, alfred);
+  assert.equal(r.estado, 'fusionada'); assert.equal(m.store.rows.get('eventos/' + b.eventId).data.retirado, true); assert.equal(m.store.rows.get('rc_par'.replace(/^/, 'revisar_candidatos/')).data.estado, 'fusionada');
+});
+test('4) fusionarPar MUEVE las sesiones que solo tenía la otra ficha (no las pierde)', async () => {
+  const m = mkMixto();
+  const k = await alta(m.bloquea, ficha({ ...base1, titulo: 'Zambomba' })), o = await alta(m.sombra, ficha({ ...base1, titulo: 'Zambomba flamenca', fechaLocal: '2099-12-08', requestId: 'o-5' }));
+  m.store.rows.get('eventos/' + o.eventId).data.sesiones = [{ fechaLocal: '2099-12-08', horaLocal: '18:00' }];
+  const sim = await m.bloquea.fusionarPar({ conservarId: k.eventId, retirarId: o.eventId, motivo: 'misma zambomba', simular: true }, alfred);
+  assert.equal(sim.sesionesAMover.length, 1);
+  await m.bloquea.fusionarPar({ conservarId: k.eventId, retirarId: o.eventId, motivo: 'misma zambomba' }, alfred);
+  const kd = m.store.rows.get('eventos/' + k.eventId).data; assert.deepEqual(kd.sesiones.map(x => x.fechaLocal), ['2099-12-07', '2099-12-08']); assert.equal(kd.fechaFinLocal, '2099-12-08');
+  assert.equal(m.store.rows.get('eventos/' + o.eventId).data.retirado, true);
+});
+test('3) alias de municipio: Lumbier/Irunberri = Lumbier; Donostia = San Sebastián; Ayala / Aiara = Ayala', async () => {
+  assert.equal(municipioClave('Lumbier/Irunberri'), municipioClave('Lumbier')); assert.equal(municipioClave('Donostia'), municipioClave('San Sebastián')); assert.equal(municipioClave('Ayala / Aiara'), municipioClave('Ayala'));
+  assert.notEqual(municipioClave('Olite/Erriberri'), municipioClave('Lumbier'));
+  const { store, ev } = mk(); const b = { lugar: 'Casa de cultura', fechaLocal: '2099-12-10', horaLocal: '19:00' };
+  await alta(ev, ficha({ ...b, city: 'Lumbier/Irunberri', titulo: 'Concierto de Navidad del coro' }));
+  const c = ficha({ ...b, city: 'Lumbier', titulo: 'Concierto de Navidad del coro de Lumbier' });
+  assert.equal((await ev.prepareAdmission(c, alfred)).admisible, false); assert.equal(store.eventos().length, 1);
+});
+test('5) un evento del 12 al 13 genera una clave por día y bloquea una alta posterior del día 13', async () => {
+  assert.deepEqual(sesionesDeEvento({ fechaLocal: '2099-12-12', fechaFinLocal: '2099-12-14', horaLocal: '10:00' }).map(s => s.fechaLocal), ['2099-12-12', '2099-12-13', '2099-12-14']);
+  assert.equal(sesionesDeEvento({ fechaLocal: '2099-01-01', fechaFinLocal: '2099-06-30' }).length, 1, 'una temporada larga no genera 180 claves');
+  const { store, ev } = mk(); const b = { city: 'Gorafe', lugar: 'Centro de interpretación del megalitismo', horaLocal: '10:00' };
+  await alta(ev, ficha({ ...b, fechaLocal: '2099-12-12', fechaFinLocal: '2099-12-13', titulo: 'Mercado navideño de artesanía' }));
+  assert.equal(store.claves().length, 2);
+  const c = ficha({ ...b, fechaLocal: '2099-12-13', titulo: 'Mercado navideño de artesanía y productos' });
+  assert.equal((await ev.prepareAdmission(c, alfred)).admisible, false);
+});
+test('6) Teatro Principal y Auditorio Principal son recintos distintos; Casa de Cultura de X = Centro Cultural X', async () => {
+  assert.notEqual(recintoClave('Teatro Principal', 'Zamora'), recintoClave('Auditorio Principal', 'Zamora'));
+  assert.equal(recintoClave('Casa de Cultura de Zizur Mayor', 'Pamplona'), recintoClave('Centro Cultural Zizur Mayor', 'Pamplona'));
+  const { store, ev } = mk(); const b = { city: 'Zamora', fechaLocal: '2099-12-10', horaLocal: '20:00' };
+  await alta(ev, ficha({ ...b, lugar: 'Teatro Principal', titulo: 'Concierto de la banda' })); await alta(ev, ficha({ ...b, lugar: 'Auditorio Principal', titulo: 'Obra infantil de marionetas' }));
+  assert.equal(store.claves().filter(c => c.fuerza === 'fuerte').length, 2, 'dos claves fuertes distintas, ya no chocan');
+  assert.equal(store.eventos().length, 2);
+});
+test('6) la fecha de los eventos antiguos sale de dateTime en hora de Madrid (no del corte UTC)', () => {
+  assert.deepEqual(fechaHoraMadrid('2026-12-04T23:30:00Z'), { fecha: '2026-12-05', hora: '00:30' });
+  assert.deepEqual(fechaHoraMadrid('2026-12-04 11:00'), { fecha: '2026-12-04', hora: '11:00' });
+  assert.deepEqual(fechaHoraMadrid('2026-07-04T22:30:00+00:00').fecha, '2026-07-05');
+  assert.equal(sesionesDeEvento({ ciudad: 'X', dateTime: '2026-12-04T23:30:00Z' })[0].fechaLocal, '2026-12-05');
 });

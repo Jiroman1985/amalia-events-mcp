@@ -78,14 +78,14 @@ export class EventService {
    }
    reserve={id:rk,data:{eventId,negocioId:e.negocioId,origen:e.origen,actor:agenteCanonico(principal.id),actorPrincipal:principal.id,at:new Date().toISOString()}};
   }
-  const claves=this.clavesModo==='off'?null:{crear:await this.clavesParaCrear(eventId,extra.discriminadorSesion?{...e,discriminadorSesion:extra.discriminadorSesion}:e),borrar:[]};
+  const claves=this.clavesModo==='off'?null:await this.planClaves(eventId,null,extra.discriminadorSesion?{...e,discriminadorSesion:extra.discriminadorSesion}:e);
   const r={...record(e,principal),...(extra.discriminadorSesion?{discriminadorSesion:extra.discriminadorSesion}:{}),...program?.record,...(registry?{procedenciaRegistro:registry.record,provenanceHash:registry.hash}:{}),creationFingerprint,requestId:input.requestId || null,...(input.confirmarOtraSesion&&!program?{confirmacionOtraSesion:{eventIds:[...new Set(input.confirmarOtraSesion.eventIds)].sort(),motivo:input.confirmarOtraSesion.motivo,evidenciaUrl:input.confirmarOtraSesion.evidenciaUrl,por:principal.id,en:new Date().toISOString()}}:{})};
   try {await this.store.write('eventos',eventId,r,{create:true,guard,claves,verifies:[...(program?.verifies||[]),...(registry?[registry.verify]:[])],extras:program?.extras,audit:{version:1,actor:agenteCanonico(principal.id),actorPrincipal:principal.id,action:'created',at:r.fechaCreacion,after:r},request:requestKey?{id:requestKey,data:{eventId,fingerprint:requestFingerprint,actor:agenteCanonico(principal.id),actorPrincipal:principal.id,negocioId:e.negocioId,...(registry?{provenanceHash:registry.hash}: {})}}:undefined,reserve});}
   catch(error){if(error.code==='version_conflict'){
    const now=await this.store.get('eventos',eventId);
    if(now?.data.creationFingerprint===creationFingerprint){assertReplayProvenance(now.data,registry);return {created:false,alreadyCreated:true,eventId,...now.data};}
    if(reserve){const held=await this.store.get('amalia_event_reservations',reserve.id);if(held&&held.data.eventId!==eventId)fail('duplicate_event_conflict',{eventId:held.data.eventId,reservaOrigen:reserve.id,revision:true});}
-   if(claves?.crear.length&&this.clavesModo==='bloquea')await this.conflictoClave(claves.crear,eventId);
+   if(claves&&this.clavesModo==='bloquea')await this.conflictoClave([...claves.crear,...claves.actualizar],eventId);
    }throw error;}
   return {created:true,eventId,...r};
  }
@@ -218,7 +218,7 @@ export class EventService {
   if(requireOpen && guard.data.admissionPaused===true)fail('admission_paused');
   return guard;
  }
- async vecinosClaves(municipioFecha){return (await this.store.list('sesiones_clave',{eq:{municipioFecha},limit:500})).map(r=>({...r.data,claveId:r.id}));}
+ async vecinosClaves(municipioFecha){return (await this.store.list('sesiones_clave',{eq:{municipioFecha},limit:500})).filter(r=>r.data.estado!=='liberada'&&r.data.eventId).map(r=>({...r.data,claveId:r.id}));}
  /** Comprobación por claves: consultas por municipio+fecha y lecturas puntuales; nunca recorre el catálogo. */
  async scanPorClaves(e,{eventId=eventIdentity(e)}={}) {
   const claves=clavesDeEvento(eventId,e),cache=new Map(),bloq=new Map(),cola=new Map();
@@ -246,40 +246,80 @@ export class EventService {
   }
   return {guard:universe.guard,scan};
  }
- // Claves de un evento a crear en el mismo commit. En sombra, una clave fuerte ya ocupada se omite (no bloquea); en bloquea el commit falla y se informa del dueño.
- async clavesParaCrear(eventId,d,{soloLibres=this.clavesModo==='sombra'}={}) {
-  const out=[];
-  for(const c of clavesDeEvento(eventId,d)){if(soloLibres&&await this.store.get('sesiones_clave',c.id))continue;out.push({id:c.id,data:c.data});}
-  return out;
+ /**
+  * Plan de claves de UN evento (nada se borra: la cuenta de servicio no puede). Solo toca claves PROPIAS (eventId igual) o libres/liberadas:
+  *  - libera (estado:'liberada', con updateTime) las claves propias del estado anterior que ya no corresponden;
+  *  - crea las nuevas (exists:false) o retoma las libres/liberadas/propias (con updateTime);
+  *  - una clave activa de OTRO evento: en bloquea error session_key_conflict; en sombra se omite. `toma` = eventIds cuyas claves se pueden heredar (fusión).
+  */
+ async planClaves(eventId,viejo,nuevo,{estricto=this.clavesModo==='bloquea',toma=[]}={}) {
+  const now=new Date().toISOString(),deseadas=nuevo?clavesDeEvento(eventId,nuevo):[],quiero=new Set(deseadas.map(c=>c.id)),filas=new Map();
+  const leer=async cid=>{if(!filas.has(cid))filas.set(cid,await this.store.get('sesiones_clave',cid));return filas.get(cid);};
+  const ops=new Map();
+  if(viejo)for(const c of clavesDeEvento(eventId,viejo)){
+   if(quiero.has(c.id))continue;
+   const row=await leer(c.id);
+   if(row&&row.data.estado!=='liberada'&&row.data.eventId===eventId)ops.set(c.id,{tipo:'actualizar',id:c.id,updateTime:row.updateTime,data:{...row.data,estado:'liberada',eventIdAnterior:eventId,eventId:null,liberadaEn:now}});
+  }
+  for(const c of deseadas){
+   const row=await leer(c.id),datos={...c.data,estado:'activa'};
+   if(!row){ops.set(c.id,{tipo:'crear',id:c.id,data:datos});continue;}
+   const activa=row.data.estado!=='liberada'&&row.data.eventId,dueno=row.data.eventId;
+   if(activa&&dueno!==eventId&&!toma.includes(dueno)){if(estricto)fail('session_key_conflict',{eventId:dueno,clave:row.data.clave,estado:'review_required',ayuda:'Esa sesión (municipio, fecha, hora y recinto) ya existe. Usa el eventId devuelto; si es otra actividad distinta, la decisión es de Alfred (cola revisar_candidatos).'});continue;}
+   if(activa&&dueno===eventId&&row.data.titulo===datos.titulo&&row.data.hora===datos.hora&&row.data.recinto===datos.recinto&&row.data.municipioFecha===datos.municipioFecha)continue;
+   ops.set(c.id,{tipo:'actualizar',id:c.id,updateTime:row.updateTime,data:datos});
+  }
+  const lista=[...ops.values()];
+  return {crear:lista.filter(o=>o.tipo==='crear').map(({id,data})=>({id,data})),actualizar:lista.filter(o=>o.tipo==='actualizar').map(({id,data,updateTime})=>({id,data,updateTime}))};
  }
  async conflictoClave(claves,eventId) {
-  for(const c of claves){const row=await this.store.get('sesiones_clave',c.id);if(row&&row.data.eventId!==eventId)fail('session_key_conflict',{eventId:row.data.eventId,clave:row.data.clave,estado:'review_required',ayuda:'Esa sesión (municipio, fecha, hora y recinto) ya existe. Usa el eventId devuelto; si es otra actividad distinta, la decisión es de Alfred (cola revisar_candidatos).'});}
+  for(const c of claves){const row=await this.store.get('sesiones_clave',c.id);if(row&&row.data.estado!=='liberada'&&row.data.eventId&&row.data.eventId!==eventId)fail('session_key_conflict',{eventId:row.data.eventId,clave:row.data.clave,estado:'review_required',ayuda:'Esa sesión (municipio, fecha, hora y recinto) ya existe. Usa el eventId devuelto; si es otra actividad distinta, la decisión es de Alfred (cola revisar_candidatos).'});}
  }
 
  aliasIdempotencia(o){if(o&&typeof o==='object'&&'idempotencyKey' in o){const {idempotencyKey,...rest}=o;return rest.requestId||!idempotencyKey?rest:{...rest,requestId:idempotencyKey};}return o;}
 
- /** Fusiona un duplicado en la ficha conservada: rellena sus huecos (fuentes, hora, dirección, imagen, fuenteId), y RETIRA (nunca borra) la otra. */
+ /**
+  * Fusiona un duplicado en la ficha conservada en UN solo commit atómico: rellena huecos de la conservada (fuentes, hora, dirección, imagen, fuenteId),
+  * MUEVE las sesiones que solo tenía la otra, retira la otra (nunca borra) y traspasa/libera las claves. Si algo cambió entretanto, no se escribe nada.
+  * simular=true devuelve el plan completo (campos, sesiones, claves y conflictos) sin escribir.
+  */
  async fusionarPar({conservarId,retirarId,motivo,simular=false},principal) {
   authorize(principal,null,'retire');authorize(principal,null,'complete');
+  if(typeof motivo!=='string'||motivo.trim().length<3||motivo.length>500)fail('reason_required');
   const k=await this.store.get('eventos',id(conservarId)),o=await this.store.get('eventos',id(retirarId));
   if(!k||!o)fail('event_not_found');if(k.id===o.id)fail('invalid_field',{campo:'retirarId'});
   if(k.data.retirado===true||o.data.retirado===true)fail('event_retired');
-  const vacio=v=>v==null||v===''||(Array.isArray(v)&&!v.length),url=o.data.fuentes?.[0]?.url||null,campos={};
-  if(Array.isArray(o.data.fuentes)&&o.data.fuentes.length)campos.fuentes=o.data.fuentes;
-  if(vacio(k.data.horaLocal??k.data.hora)&&o.data.horaLocal&&url)campos.horaLocal=o.data.horaLocal;
-  if(vacio(k.data.direccion)&&o.data.direccion)campos.direccion=o.data.direccion;
-  if(vacio(k.data.image??k.data.imagen)&&vacio(k.data.assetId)&&o.data.assetId)campos.assetId=o.data.assetId;
-  const ya=sesionesDeEvento(k.data),pendientes=sesionesDeEvento(o.data).filter(x=>!ya.some(y=>y.fechaLocal===x.fechaLocal&&(y.horaLocal||null)===(x.horaLocal||null)));
-  const plan={conservar:k.id,retirar:o.id,camposAAplicar:Object.keys(campos),moverFuenteId:vacio(k.data.fuenteId)&&!!o.data.fuenteId,sesionesSinMover:pendientes};
-  if(simular)return {simulado:true,escrito:false,...plan};
-  let completado=false;
-  if(Object.keys(campos).length){const out=await this.complete({eventId:k.id,negocioId:k.data.negocioId,expectedVersion:k.data.version||0,campos,motivo:`Fusión: ${motivo}`,evidenciaUrl:url},principal);completado=out.completado;}
-  if(plan.moverFuenteId){const cur=await this.store.get('eventos',k.id);await this.store.write('eventos',k.id,{fuenteId:o.data.fuenteId,fuenteIdAnterior:cur.data.fuenteId??null},{updateTime:cur.updateTime,updateFields:['fuenteId','fuenteIdAnterior'],metadataOnly:true});}
-  const before=await this.store.get('eventos',o.id);
-  await this.retire({eventId:o.id,negocioId:before.data.negocioId,expectedVersion:before.data.version||0,motivo:`Duplicado de ${k.id}: ${motivo}`,codigoConfirmacion:this.confirmationCode(before)},principal);
-  return {...plan,escrito:true,completado,retirada:o.id};
+  const vacio=v=>v==null||v===''||(Array.isArray(v)&&!v.length),now=new Date().toISOString(),kd=k.data,od=o.data;
+  const set={};
+  if(Array.isArray(od.fuentes)&&od.fuentes.length){const merged=mergeSources(kd.fuentes,od.fuentes);if(fingerprint(merged)!==fingerprint(kd.fuentes||[]))set.fuentes=merged;}
+  if(vacio(kd.horaLocal??kd.hora)&&od.horaLocal)set.horaLocal=od.horaLocal;
+  if(vacio(kd.direccion)&&od.direccion)set.direccion=od.direccion;
+  if(vacio(kd.image??kd.imagen)&&vacio(kd.assetId)){if(od.assetId)set.assetId=od.assetId;if(od.image&&vacio(kd.image))set.image=od.image;if(od.sourceImageUrl&&vacio(kd.sourceImageUrl))set.sourceImageUrl=od.sourceImageUrl;}
+  const fuenteIdMovida=vacio(kd.fuenteId)&&!!od.fuenteId;if(fuenteIdMovida){set.fuenteId=od.fuenteId;set.fuenteIdAnterior=kd.fuenteId??null;}
+  const ya=sesionesDeEvento(kd),mover=sesionesDeEvento(od).filter(x=>!ya.some(y=>y.fechaLocal===x.fechaLocal&&(y.horaLocal||null)===(x.horaLocal||null)));
+  if(mover.length){authorize(principal,null,'edit');const todas=[...ya,...mover].sort((x,y)=>x.fechaLocal<y.fechaLocal?-1:x.fechaLocal>y.fechaLocal?1:(x.horaLocal||'')<(y.horaLocal||'')?-1:1);set.sesiones=todas;set.fechaLocal=todas[0].fechaLocal;set.fechaFinLocal=todas.at(-1).fechaLocal;}
+  const version=(kd.version||0)+1,patchK={...set,version,updatedBy:agenteCanonico(principal.id),updatedByPrincipal:principal.id,fechaActualizacion:now};
+  const afterK={...kd,...patchK},vo=od.version||0;
+  const patchO={retirado:true,retiradoPor:agenteCanonico(principal.id),retiradoPorPrincipal:principal.id,retiradoEn:now,retiradoMotivo:`Duplicado de ${k.id}: ${motivo.trim()}`,retiradoVersion:vo,estadoAnterior:od.estado??null,activaAnterior:od.activa??null,estado:'retirado',activa:false,version:vo+1,updatedBy:agenteCanonico(principal.id),updatedByPrincipal:principal.id,fechaActualizacion:now};
+  let claves=null,conflicto=null;
+  if(this.clavesModo!=='off'){
+   try{
+    const delOtro=await this.planClaves(o.id,od,null),delKeeper=await this.planClaves(k.id,kd,afterK,{toma:[o.id],estricto:this.clavesModo==='bloquea'}),mapa=new Map();
+    for(const c of delOtro.actualizar)mapa.set(c.id,{tipo:'actualizar',...c});
+    for(const c of delKeeper.actualizar)mapa.set(c.id,{tipo:'actualizar',...c});
+    const crear=delKeeper.crear;claves={crear,actualizar:[...mapa.values()].map(({tipo,...c})=>c)};
+   }catch(e){if(e.code==='session_key_conflict')conflicto=e.details;else throw e;}
+  }
+  const plan={conservar:k.id,retirar:o.id,camposAAplicar:Object.keys(set).filter(x=>x!=='fuenteIdAnterior'),sesionesAMover:mover,moverFuenteId:fuenteIdMovida,claves:claves?{crear:claves.crear.map(c=>c.data.clave),actualizar:claves.actualizar.map(c=>c.data.clave||c.id)}:null,conflictoClaves:conflicto,versionConservada:version-1,versionRetirada:vo,atomico:true};
+  if(simular)return {simulado:true,escrito:false,...plan,siguientePaso:conflicto?'Hay un conflicto de claves: resuélvelo antes de fusionar.':'Aplica sin simular: una sola operación atómica.'};
+  if(conflicto)fail('session_key_conflict',conflicto);
+  const audit=(ev,before,patch,action)=>({version:patch.version,actor:agenteCanonico(principal.id),actorPrincipal:principal.id,action,reason:motivo.trim(),at:now,before,after:patch});
+  await this.store.writeMany([
+   {key:k.id,data:patchK,updateTime:k.updateTime,updateFields:Object.keys(patchK),audit:audit(k,{version:kd.version||0},patchK,'merged_from_duplicate')},
+   {key:o.id,data:patchO,updateTime:o.updateTime,updateFields:Object.keys(patchO),audit:audit(o,{retirado:false,version:vo},patchO,'retired')}
+  ],{claves,guard:{updateTime:(await this.catalogGuard()).updateTime}});
+  return {...plan,escrito:true,retirada:o.id,sesionesMovidas:mover.length};
  }
-
  async resolverPar(row,{accion,eventIdDestino,motivo,simular},principal) {
   const {a,b}=row.data,res={accion,por:agenteCanonico(principal.id),porPrincipal:principal.id,en:new Date().toISOString(),motivo:motivo.trim()};
   const cierra=async(estado,extra={})=>{await this.store.write('revisar_candidatos',row.id,{...row.data,estado,resolucion:{...res,...extra},version:(row.data.version||1)+1},{updateTime:row.updateTime});};
@@ -622,11 +662,11 @@ export class EventService {
     const diff=Object.fromEntries(updateFields.filter(k=>JSON.stringify(old[k]??null)!==JSON.stringify(after[k]??null)).map(k=>[k,{antes:old[k]??null,despues:after[k]??null}]));
     return {simulado:true,escrito:false,eventId,versionActual:old.version||0,versionResultante:after.version,camposQueCambian:Object.keys(diff),cambios:diff,duplicadosComprobados:SCAN.some(k=>k in ch),siguientePaso:`Repite sin simular (o con simular=false), con expectedVersion=${old.version||0} y los mismos changesJson/reason. Nada se ha escrito.`};
    }
+   let clavesEdicion=null;
    try{
-    let clavesEdicion=null;
-    if(this.clavesModo!=='off'){const oldK=clavesDeEvento(eventId,old),newK=clavesDeEvento(eventId,after),oldIds=new Set(oldK.map(k=>k.id)),newIds=new Set(newK.map(k=>k.id));let crear=newK.filter(k=>!oldIds.has(k.id));if(this.clavesModo==='sombra'){const libres=[];for(const k of crear)if(!await this.store.get('sesiones_clave',k.id))libres.push(k);crear=libres;}clavesEdicion={crear:crear.map(k=>({id:k.id,data:k.data})),borrar:oldK.filter(k=>!newIds.has(k.id)).map(k=>k.id)};}
+    clavesEdicion=this.clavesModo==='off'?null:await this.planClaves(eventId,old,after);
     await this.store.write('eventos',eventId,after,{updateTime:before.updateTime,updateFields,guard,claves:clavesEdicion,moveReserve:reserveMove,audit:{version:after.version,actor:agenteCanonico(principal.id),actorPrincipal:principal.id,action:mode==='complete'?'completed':'updated',reason,evidenciaUrl:evidenciaUrl||null,at:now,before:old,after}});
-   }catch(error){if(error.code==='version_conflict'&&this.clavesModo==='bloquea'&&clavesEdicion?.crear.length)await this.conflictoClave(clavesEdicion.crear,eventId);if(error.code==='version_conflict'&&attempt<2){const cur=await this.store.get('eventos',eventId);if(cur&&(cur.data.version||0)===expectedVersion)continue;}throw error;}
+   }catch(error){if(error.code==='version_conflict'&&this.clavesModo==='bloquea'&&clavesEdicion)await this.conflictoClave([...clavesEdicion.crear,...clavesEdicion.actualizar],eventId);if(error.code==='version_conflict'&&attempt<2){const cur=await this.store.get('eventos',eventId);if(cur&&(cur.data.version||0)===expectedVersion)continue;}throw error;}
    return {eventId,...after};
   }
  }
@@ -676,7 +716,7 @@ export class EventService {
   const now=new Date().toISOString(),version=expectedVersion+1,old=before.data;
   const patch={retirado:true,retiradoPor:agenteCanonico(principal.id),retiradoPorPrincipal:principal.id,retiradoEn:now,retiradoMotivo:motivo.trim(),retiradoVersion:expectedVersion,estadoAnterior:old.estado ?? null,activaAnterior:old.activa ?? null,estado:'retirado',activa:false,version,updatedBy:agenteCanonico(principal.id),updatedByPrincipal:principal.id,fechaActualizacion:now};
   if(programResolution)patch.programAncestorResolution=programResolution.resolution;
-  const clavesRetiro=this.clavesModo==='off'?null:{crear:[],borrar:clavesDeEvento(eventId,old).map(k=>k.id)};
+  const clavesRetiro=this.clavesModo==='off'?null:await this.planClaves(eventId,old,null);
   await this.store.write('eventos',eventId,patch,{updateTime:before.updateTime,claves:clavesRetiro,guard:programResolution?.guard,verifies:programResolution?.verifies,extras:programResolution?.extras,updateFields:Object.keys(patch),audit:{version,actor:agenteCanonico(principal.id),actorPrincipal:principal.id,action:'retired',reason:patch.retiradoMotivo,at:now,before:{retirado:false,estado:old.estado ?? null,activa:old.activa ?? null,version:expectedVersion},after:patch}});
   return {eventId,...old,...patch};
  }
@@ -696,8 +736,8 @@ export class EventService {
   if(old.estadoAnterior!=null)patch.estado=old.estadoAnterior;
   if(old.activaAnterior!=null)patch.activa=old.activaAnterior;
   const mask=[...fields,'estado','activa'];
-  const clavesRestauro=this.clavesModo==='off'?null:{crear:await this.clavesParaCrear(eventId,{...old,...patch}),borrar:[]};
-  try{await this.store.write('eventos',eventId,patch,{updateTime:before.updateTime,updateFields:mask,claves:clavesRestauro,audit:{version,actor:agenteCanonico(principal.id),actorPrincipal:principal.id,action:'restored',reason:patch.recuperadoMotivo,at:now,before:{retirado:true,retiradoPor:old.retiradoPor ?? null,retiradoEn:old.retiradoEn ?? null,version:expectedVersion},after:patch}});}catch(error){if(error.code==='version_conflict'&&this.clavesModo==='bloquea'&&clavesRestauro?.crear.length)await this.conflictoClave(clavesRestauro.crear,eventId);throw error;}
+  const clavesRestauro=this.clavesModo==='off'?null:await this.planClaves(eventId,null,{...old,...patch});
+  try{await this.store.write('eventos',eventId,patch,{updateTime:before.updateTime,updateFields:mask,claves:clavesRestauro,audit:{version,actor:agenteCanonico(principal.id),actorPrincipal:principal.id,action:'restored',reason:patch.recuperadoMotivo,at:now,before:{retirado:true,retiradoPor:old.retiradoPor ?? null,retiradoEn:old.retiradoEn ?? null,version:expectedVersion},after:patch}});}catch(error){if(error.code==='version_conflict'&&this.clavesModo==='bloquea'&&clavesRestauro)await this.conflictoClave([...clavesRestauro.crear,...clavesRestauro.actualizar],eventId);throw error;}
   const after={eventId,...old,...patch};if(!('estado' in patch))delete after.estado;if(!('activa' in patch))delete after.activa;return after;
  }
  async history(eventId,businessId,principal){await this.get(eventId,businessId,principal);return {eventId,revisiones:await this.store.revisions(eventId)};}

@@ -3,14 +3,34 @@
 import { hash } from './event-domain.mjs';
 import { claveNombre, leg, horaDe, nombreParecido, terminosNombre } from './dedup_amalia.mjs';
 
-const GENERICAS = new Set(['de','del','la','las','el','los','y','plaza','auditorio','casa','cultura','centro','cultural','salon','sala','municipal','polideportivo','pabellon','parque','iglesia','ayuntamiento','calle','avenida','paseo','teatro','biblioteca','museo']);
+// Solo se quitan artículos/preposiciones y prefijos vacíos de «casa/centro de cultura». El TIPO de recinto (teatro, auditorio, museo, iglesia, plaza, calle…) distingue lugares y NO se quita:
+// «Teatro Principal» y «Auditorio Principal» son recintos distintos.
+const GENERICAS = new Set(['de','del','la','las','el','los','y','e','en','casa','centro','cultura','cultural','municipal']);
+// Alias de municipio (bilingües y oficiales). Cada grupo se reduce a su primer elemento. Ampliar aquí; no hay tabla INE offline.
+const ALIAS_MUNICIPIO = [
+  ['donostia','san sebastian','donostia san sebastian'],['vitoria','vitoria gasteiz','gasteiz'],['pamplona','iruna','pamplona iruna'],['bilbao','bilbo'],
+  ['lumbier','irunberri'],['olite','erriberri'],['pueyo','puiu'],['ayala','aiara'],['ochagavia','otsagabia'],['roncal','erronkari'],['luzaide','valcarlos'],['aibar','oibar'],
+  ['a coruna','la coruna','coruna'],['ourense','orense'],['lugo','lugo'],['girona','gerona'],['lleida','lerida'],['castellon de la plana','castello de la plana','castellon'],
+  ['alicante','alacant'],['elche','elx'],['a estrada','la estrada'],['noia','noya'],['santiago de compostela','compostela'],['mahon','mao'],['ciutadella','ciudadela'],['sant cugat del valles','san cugat del valles'],
+  ['hospitalet de llobregat','l hospitalet de llobregat','el hospitalet de llobregat'],['vilanova i la geltru','villanueva y geltru'],['sanlucar de barrameda','sanlucar'],['donostia']
+];
+const MAPA_ALIAS = new Map(); for (const g of ALIAS_MUNICIPIO) for (const a of g) if (!MAPA_ALIAS.has(a)) MAPA_ALIAS.set(a, g[0]);
+/** Municipio canónico: normaliza, parte «Lumbier/Irunberri» o «Ayala / Aiara» en sus nombres y los reduce a su grupo de alias. */
+export function municipioClave(city) {
+  const full = claveNombre(String(city || '').replace(/[\/|]/g, ' | '));
+  if (!full) return '';
+  const partes = String(city || '').split(/\s*[\/|]\s*/).map(x => claveNombre(x)).filter(Boolean);
+  if (MAPA_ALIAS.has(claveNombre(city))) return MAPA_ALIAS.get(claveNombre(city));
+  for (const p of partes) if (MAPA_ALIAS.has(p)) return MAPA_ALIAS.get(p);
+  return partes[0] || full;
+}
 const ISO = /^\d{4}-\d{2}-\d{2}$/;
 const HORA = /^([01]\d|2[0-3]):[0-5]\d$/;
 
 /** Recinto normalizado: minúsculas, sin tildes/signos, sin artículos ni genéricos SOLO si queda algún término; vacío si es el propio municipio. */
 export function recintoClave(lugar, city) {
   const full = claveNombre(lugar);
-  if (!full || full === claveNombre(city)) return '';
+  if (!full || full === claveNombre(city) || full === municipioClave(city)) return '';
   const rest = full.split(' ').filter(t => t && !GENERICAS.has(t));
   return rest.length ? rest.join(' ') : full;
 }
@@ -24,12 +44,12 @@ export function normalizarUrl(u) {
     return host + x.pathname.replace(/\/+$/, '') + q;
   } catch { return String(u || '').trim().toLowerCase(); }
 }
-const ciudadDe = d => leg(d, 'city', 'ciudad') || (typeof d.ubicacion === 'string' ? d.ubicacion : d.ubicacion?.municipio);
+export const ciudadDe = d => leg(d, 'city', 'ciudad') || (typeof d.ubicacion === 'string' ? d.ubicacion : d.ubicacion?.municipio);
 const lugarDe = d => leg(d, 'lugar', 'recinto', 'venue') || (d.ubicacion && typeof d.ubicacion === 'object' ? d.ubicacion.lugar : null);
 
 /** Clave de UNA sesión. null si falta municipio o fecha ISO (no se inventa nada). */
 export function claveSesion({ city, lugar, fechaLocal, horaLocal, discriminador = '' }) {
-  const municipio = claveNombre(city);
+  const municipio = municipioClave(city);
   if (!municipio || !ISO.test(String(fechaLocal || ''))) return null;
   const hora = HORA.test(String(horaLocal || '')) ? horaLocal : null;
   const recinto = recintoClave(lugar, city);
@@ -37,11 +57,27 @@ export function claveSesion({ city, lugar, fechaLocal, horaLocal, discriminador 
   const clave = [municipio, fechaLocal, hora || 'sin_hora', recinto].join('|') + (discriminador ? '|#' + claveNombre(discriminador) : '');
   return { municipio, fecha: fechaLocal, hora, recinto, discriminador: discriminador || '', fuerza, clave, municipioFecha: municipio + '|' + fechaLocal };
 }
-/** Sesiones de un evento (sesiones[] + fecha principal). */
+/** Fecha local de Madrid de un instante: con offset/Z se convierte; sin offset («2026-12-04 11:00») ya es hora local. */
+export function fechaHoraMadrid(dateTime, tz = 'Europe/Madrid') {
+  if (typeof dateTime !== 'string' || !/^\d{4}-\d{2}-\d{2}/.test(dateTime)) return { fecha: null, hora: null };
+  if (!/(Z|[+-]\d{2}:?\d{2})$/.test(dateTime)) return { fecha: dateTime.slice(0, 10), hora: /^\d{4}-\d{2}-\d{2}[T ](\d{2}:\d{2})/.test(dateTime) ? dateTime.slice(11, 16) : null };
+  const t = new Date(dateTime); if (!Number.isFinite(t.getTime())) return { fecha: dateTime.slice(0, 10), hora: null };
+  const f = new Intl.DateTimeFormat('en-CA', { timeZone: tz, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).formatToParts(t).reduce((o, p) => (o[p.type] = p.value, o), {});
+  return { fecha: `${f.year}-${f.month}-${f.day}`, hora: `${f.hour}:${f.minute}` };
+}
+const MAX_DIAS_RANGO = 31;
+const sumaDias = (iso, n) => new Date(Date.parse(iso + 'T00:00:00Z') + n * 864e5).toISOString().slice(0, 10);
+/** Sesiones de un evento: sesiones[] si existen; si no, UNA por día entre fechaLocal y fechaFinLocal (hasta 31 días; un rango mayor es una exposición/temporada y solo cuenta el primer día). */
 export function sesionesDeEvento(d) {
-  const f = leg(d, 'fechaLocal', 'fecha_inicio') || (typeof d.dateTime === 'string' ? d.dateTime.slice(0, 10) : null);
+  const dt = fechaHoraMadrid(d.dateTime, d.timeZone || 'Europe/Madrid');
+  const f = leg(d, 'fechaLocal', 'fecha_inicio') || dt.fecha;
+  const hora = d.horaLocal || d.hora || dt.hora || null;
   const lista = Array.isArray(d.sesiones) && d.sesiones.length ? d.sesiones.map(s => ({ fechaLocal: s.fechaLocal, horaLocal: s.horaLocal || null })) : [];
-  if (f && !lista.some(s => s.fechaLocal === f)) lista.unshift({ fechaLocal: f, horaLocal: horaDe(d) });
+  if (f && !lista.some(s => s.fechaLocal === f)) lista.unshift({ fechaLocal: f, horaLocal: hora });
+  if (!(Array.isArray(d.sesiones) && d.sesiones.length) && f && ISO.test(f) && ISO.test(String(d.fechaFinLocal || '')) && d.fechaFinLocal > f) {
+    const dias = Math.round((Date.parse(d.fechaFinLocal) - Date.parse(f)) / 864e5);
+    if (dias <= MAX_DIAS_RANGO) for (let i = 1; i <= dias; i++) lista.push({ fechaLocal: sumaDias(f, i), horaLocal: hora });
+  }
   return lista;
 }
 /**
@@ -56,7 +92,7 @@ export function clavesDeEvento(eventId, d, { discriminador = '' } = {}) {
     const fuerte = k.fuerza === 'fuerte';
     const id = 'sk_' + hash(k.clave + (fuerte ? '' : '\0' + eventId)).slice(0, 40);
     if (out.some(o => o.id === id)) continue;
-    out.push({ id, fuerte, data: { eventId, negocioId: d.negocioId || null, clave: k.clave, fuerza: k.fuerza, municipio: k.municipio, fecha: k.fecha, hora: k.hora, recinto: k.recinto, municipioFecha: k.municipioFecha, titulo: claveNombre(leg(d, 'titulo', 'nombre')), tituloOriginal: leg(d, 'titulo', 'nombre') || null, urlNorm: d.fuentes?.[0]?.url ? normalizarUrl(d.fuentes[0].url) : null, discriminador: k.discriminador, at: new Date().toISOString() } });
+    out.push({ id, fuerte, data: { eventId, negocioId: d.negocioId || null, clave: k.clave, fuerza: k.fuerza, municipio: k.municipio, fecha: k.fecha, hora: k.hora, recinto: k.recinto, municipioFecha: k.municipioFecha, estado: 'activa', prueba: d.prueba === true, titulo: claveNombre(leg(d, 'titulo', 'nombre')), tituloOriginal: leg(d, 'titulo', 'nombre') || null, urlNorm: d.fuentes?.[0]?.url ? normalizarUrl(d.fuentes[0].url) : null, discriminador: k.discriminador, at: new Date().toISOString() } });
   }
   return out;
 }
