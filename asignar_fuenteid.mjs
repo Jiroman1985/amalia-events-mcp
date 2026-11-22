@@ -32,7 +32,7 @@ for (const r of candidatos) {
   }
   if (pares) {
     const prop = pares[r.id], { fila, cadena } = canonico(prop), porUrl = exactas.map(x => x.fuenteId);
-    const accion = !fila ? 'fuente_no_existe' : fila.data.estado === 'descartada' || fila.data.estado === 'bloqueada' ? 'fuente_' + fila.data.estado : porUrl.length && !porUrl.includes(fila.id) && !porUrl.some(x => cadena.includes(x)) ? 'no_coincide_con_url' : 'asignar';
+    const accion = d.retirado === true ? 'evento_retirado' : d.fuenteId ? 'ya_tiene_fuenteId' : !fila ? 'fuente_no_existe' : fila.data.estado === 'descartada' || fila.data.estado === 'bloqueada' ? 'fuente_' + fila.data.estado : porUrl.length && !porUrl.includes(fila.id) && !porUrl.some(x => cadena.includes(x)) ? 'no_coincide_con_url' : 'asignar';
     plan.push({ eventId: r.id, negocioId: d.negocioId, version: d.version || 0, titulo: d.titulo, city: d.city, fechaLocal: d.fechaLocal, url: urls[0] || null, accion, fuenteIdLedger: prop, fusionadaHacia: cadena.length ? fila?.id ?? null : null, fuenteIdPropuesta: accion === 'asignar' ? fila.id : null, fuente: fila ? { fuenteId: fila.id, nombre: fila.data.nombre_entidad ?? null, url: fila.data.url ?? null, estado: fila.data.estado ?? null } : null, coincidePorUrl: porUrl.length ? (porUrl.includes(fila?.id) || porUrl.some(x => cadena.includes(x))) : null, candidatas: porUrl.includes(fila?.id) || porUrl.some(x => cadena.includes(x)) ? [] : [...exactas, ...parecidas].slice(0, 3).map(resumen) });
     continue;
   }
@@ -46,9 +46,10 @@ const yaTienen = pares ? eventos.filter(e => e.id in pares && e.data.fuenteId).m
 const informe = { generado: new Date().toISOString(), modo: aplicar ? 'APLICAR' : 'ENSAYO (no se ha escrito nada)', agente, tarea: tarea ? { id: tarea.id, titulo: tarea.data.titulo, estado: tarea.data.estado, detalle: tarea.data.detalle ?? null, referencias: tarea.data.referencias ?? null } : null, sinFuenteIdTotal: candidatos.length, ...(pares ? { paresRecibidos: Object.keys(pares).length, eventosInexistentes: sinEncontrar, yaTenianFuenteId: yaTienen } : {}), cuenta, huella, plan };
 if (!aplicar) { const out = arg('salida'); if (out) writeFileSync(out, JSON.stringify(informe, null, 1)); console.log(JSON.stringify(out ? { ...informe, plan: undefined } : informe, null, 1)); process.exit(0); }
 if (arg('confirmo') !== huella) { console.error('La huella no coincide: repite el ensayo. Actual: ' + huella); process.exit(2); }
-const ev = new EventService(store, {}, { warm: false }), principal = { id: 'alfred-ediciones', actions: ['read', 'edit'], businesses: ['*'] }, resultado = [];
+const imagenActual = {}, ev = new EventService(store, { get: id => imagenActual[id] || { url: null, sourceUrl: null } }, { warm: false }), principal = { id: 'alfred-ediciones', actions: ['read', 'edit'], businesses: ['*'] }, resultado = [];
 for (const p of plan.filter(x => x.accion === 'asignar')) {
-  try { const o = await ev.update({ eventId: p.eventId, negocioId: p.negocioId, expectedVersion: p.version, changes: { fuenteId: p.fuenteIdPropuesta }, reason: `Enlazar con la fuente del registro (tarea ${tareaId || 'fuenteId'})` }, principal); resultado.push({ eventId: p.eventId, ok: true, version: o.version }); }
+  try { const d0 = (await store.get('eventos', p.eventId))?.data || {}; if (d0.assetId) imagenActual[d0.assetId] = { url: d0.image ?? null, sourceUrl: d0.sourceImageUrl ?? d0.image ?? null };
+    const o = await ev.update({ eventId: p.eventId, negocioId: p.negocioId, expectedVersion: p.version, changes: { fuenteId: p.fuenteIdPropuesta }, reason: `Enlazar con la fuente del registro (tarea ${tareaId || 'fuenteId'})` }, principal); resultado.push({ eventId: p.eventId, ok: true, version: o.version }); }
   catch (e) { resultado.push({ eventId: p.eventId, ok: false, error: e.code || e.message }); }
 }
 console.log(JSON.stringify({ modo: 'APLICADO', resultado }, null, 1));
