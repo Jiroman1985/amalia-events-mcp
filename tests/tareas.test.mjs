@@ -88,3 +88,20 @@ test('resumen por agente: ahora, siguientes, bloqueadas y alertas (sin tareas, s
   assert.equal(por.hark.alerta, 'sin_tareas_publicadas'); assert.equal(por.amalia.ultimaActualizacion, null);
   assert.deepEqual(r.conAlerta.map(x => x.agente).sort(), ['amalia', 'conchi', 'hark', 'lola']);
 });
+
+test('estadoPanel: en pausa con tanda programada; bloqueado solo si depende del propio agente', async () => {
+  const s = new Store(), ahora = Date.UTC(2026, 10, 21, 11, 0, 0);
+  const est = async () => Object.fromEntries((await resumenTareas(s, alfred, { ahora })).agentes.map(a => [a.agente, a.estadoPanel]));
+  assert.equal((await est()).hark, 'sin_tareas');
+  const sig = await publicarTarea(s, { titulo: 'Tanda de revisión de las 18:00' }, hark, { now });
+  assert.equal((await est()).hark, 'en_pausa'); // nada en curso, sí una tanda programada
+  await actualizarTarea(s, { tareaId: sig.tareaId, estado: 'en_curso' }, hark, { now });
+  assert.equal((await est()).hark, 'en_curso');
+  await actualizarTarea(s, { tareaId: sig.tareaId, estado: 'bloqueada', motivoBloqueo: 'Espero a que Alfred decida', esperaA: 'alfred' }, hark, { now });
+  assert.equal((await est()).hark, 'en_pausa'); // espera a otra persona: no cuenta como bloqueado
+  const propia = await publicarTarea(s, { titulo: 'Otra tarea', estado: 'en_curso' }, hark, { now });
+  await actualizarTarea(s, { tareaId: propia.tareaId, estado: 'bloqueada', motivoBloqueo: 'Fallo mío al leer la fuente' }, hark, { now });
+  assert.equal((await est()).hark, 'bloqueado');
+  const r = (await resumenTareas(s, alfred, { ahora })).agentes.find(a => a.agente === 'hark');
+  assert.equal(r.bloqueadas.find(b => b.esperaA).esperaA, 'alfred');
+});

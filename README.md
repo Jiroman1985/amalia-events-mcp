@@ -165,6 +165,12 @@ Pruebas reproducibles: `FIRESTORE_EMULATOR_HOST=127.0.0.1:8686 AMALIA_TEST_PUBLI
 - Municipio con alias (`Lumbier/Irunberri`, `Donostia`/`San Sebastián`…, tabla ampliable en `clave-sesion.mjs`); una clave por **día** en rangos `fechaLocal`–`fechaFinLocal` (hasta 31 días); el tipo de recinto (teatro, auditorio, museo, iglesia, plaza…) ya no se quita; fecha/hora de eventos antiguos desde `dateTime` en hora de Madrid.
 - `rellenar_claves.mjs`: lo que sobra se libera, no se borra.
 
+## 2.25.4 — estado «en pausa» en el panel (SIGUE EN SOMBRA)
+
+- `resumen_tareas` devuelve `estadoPanel` por agente: `en_curso`, `en_pausa` (nada en curso pero con tanda siguiente programada), `bloqueado` (solo si algo depende del propio agente) o `sin_tareas`.
+- `actualizar_tarea` acepta `esperaA` al bloquear: una tarea que espera a otra persona no marca al agente como bloqueado. `bloqueadas[]` incluye `esperaA`.
+- Permiso `review` añadido al token `amalia-asistente` (solo configuración, sin cambio de código).
+
 ## 2.25.3 — reservas sin borrado, alias ampliados, editar_negocio, temporadas (SIGUE EN SOMBRA)
 
 - `moveReserve`: la reserva de origen vieja se **libera** (`estado:'liberada'`, con precondición de versión) y la nueva se crea o retoma una liberada; una reserva liberada equivale a no existir en todas las lecturas. La cuenta de servicio no borra.
