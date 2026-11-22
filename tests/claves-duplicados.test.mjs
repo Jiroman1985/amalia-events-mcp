@@ -267,3 +267,10 @@ test('la procedenciaRegistro se conserva al resolver desde la cola (se guarda al
   assert.equal(r.estado, 'admitida'); assert.deepEqual(llamadas[0].raw, prov); assert.equal(llamadas[0].review, true);
   const ev1 = store.rows.get('eventos/' + r.eventId).data; assert.equal(ev1.provenanceHash, 'a'.repeat(64)); assert.equal(ev1.procedenciaRegistro.fuenteId, 'fte_web_x');
 });
+
+test('la cola de auditoría muestra los dos eventos, los títulos y la propuesta de ficha a conservar', async () => {
+  const { store, ev } = mk();
+  await store.write('revisar_candidatos', 'rc_x1', { tipo: 'auditoria_par', estado: 'pendiente', a: 'ev_a', b: 'ev_b', titulos: ['A', 'B'], motivos: ['misma_clave_fuerte'], exactoSeguro: true, propuesta: { conservar: 'ev_a', retirar: 'ev_b' }, clave: 'k' }, { create: true });
+  const [it] = (await ev.listarRevision({}, conchi)).items;
+  assert.equal(it.eventoA, 'ev_a'); assert.equal(it.eventoB, 'ev_b'); assert.deepEqual(it.propuesta, { conservar: 'ev_a', retirar: 'ev_b' }); assert.equal(it.exactoSeguro, true);
+});
