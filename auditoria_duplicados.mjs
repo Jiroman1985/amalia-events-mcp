@@ -1,6 +1,7 @@
 // auditoria_duplicados.mjs — auditoría nocturna de duplicados. Por defecto SOLO PROPONE (informe + cola); no retira nada.
 //   Informe:                node auditoria_duplicados.mjs --salida informe.json
 //   + cola de Alfred:       node auditoria_duplicados.mjs --encolar          (todos los dudosos, tipo auditoria_par en revisar_candidatos)
+//                           node auditoria_duplicados.mjs --encolar-ids evA,evB   (todos los pares que implican esos eventos)
 //                           node auditoria_duplicados.mjs --encolar-fuertes  (solo exactos seguros + choques de clave fuerte; con propuesta de qué ficha conservar)
 //   + informe en Firestore: node auditoria_duplicados.mjs --guardar          (informes_duplicados/AAAA-MM-DD)
 //   Retirada automática (FASE 2, solo con aprobación): --retirar --confirmo <huella>  (solo exactos seguros; conserva la ficha más completa)
@@ -21,7 +22,8 @@ if (arg('salida')) writeFileSync(arg('salida'), JSON.stringify(informe, null, 2)
 const log = { encolados: 0, guardado: false, retiradas: [], errores: [] };
 if (arg('guardar')) { try { await store.write('informes_duplicados', hoy, informe, { create: true }); log.guardado = true; } catch (e) { const cur = await store.get('informes_duplicados', hoy); await store.write('informes_duplicados', hoy, informe, { updateTime: cur.updateTime }); log.guardado = true; } }
 const fuertes = [...exactos.map(p => ({ ...p, exacto: true })), ...dudosos.filter(p => p.motivos.some(m => m.startsWith('misma_clave')))];
-const aEncolar = arg('encolar-fuertes') ? fuertes : arg('encolar') ? dudosos : [];
+const ids = new Set(String(arg('encolar-ids') || '').split(',').filter(Boolean));
+const aEncolar = ids.size ? [...exactos.map(p => ({ ...p, exacto: true })), ...dudosos].filter(p => ids.has(p.a) || ids.has(p.b)) : arg('encolar-fuertes') ? fuertes : arg('encolar') ? dudosos : [];
 const porId = new Map(rows.map(r => [r.id, r]));
 for (const p of aEncolar) {
   const id = 'rc_' + hash('par\0' + [p.a, p.b].sort().join('>')).slice(0, 40);
