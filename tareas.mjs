@@ -7,7 +7,7 @@ import { agenteCanonico } from './identidad.mjs';
 
 export const COL = 'tareas_agentes';
 export const ESTADOS = ['en_curso', 'siguiente', 'bloqueada', 'hecha', 'cancelada'];
-export const AGENTES_CONOCIDOS = ['alfred', 'alfie', 'conchi', 'amalia', 'hark', 'lola'];
+export const AGENTES_CONOCIDOS = ['alfred', 'alfie', 'conchi', 'amalia', 'hark', 'lola', 'rene'];
 const MAX_EN_CURSO = 5, MAX_SIGUIENTES = 40, HORAS_SIN_ACTUALIZAR = 24, DIAS_HECHAS = 7;
 const AGENTE_RE = /^[a-z0-9_-]{2,40}$/, HORA_MS = 3600000, DIA_MS = 86400000;
 const TRANSICIONES = { siguiente: ['en_curso', 'cancelada', 'bloqueada'], en_curso: ['hecha', 'bloqueada', 'siguiente', 'cancelada'], bloqueada: ['en_curso', 'siguiente', 'cancelada'], hecha: [], cancelada: [] };

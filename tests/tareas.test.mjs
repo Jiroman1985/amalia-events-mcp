@@ -82,11 +82,11 @@ test('resumen por agente: ahora, siguientes, bloqueadas y alertas (sin tareas, s
   const c = await publicarTarea(s, { titulo: 'Revisar Soria', estado: 'en_curso' }, conchi, { now: viejo }); void c;
   const w = await publicarTarea(s, { titulo: 'Taller bloqueado', estado: 'en_curso' }, alfie, { now: t0 }); await actualizarTarea(s, { tareaId: w.tareaId, estado: 'bloqueada', motivoBloqueo: 'Falta licencia' }, alfie, { now: t0 });
   const r = await resumenTareas(s, panel, { ahora }); const por = Object.fromEntries(r.agentes.map(a => [a.agente, a]));
-  assert.deepEqual(Object.keys(por).sort(), ['alfie', 'alfred', 'amalia', 'conchi', 'hark', 'lola']);
+  assert.deepEqual(Object.keys(por).sort(), ['alfie', 'alfred', 'amalia', 'conchi', 'hark', 'lola', 'rene']);
   assert.equal(por.alfred.enCurso[0].titulo, 'Reparto de zonas'); assert.equal(por.alfred.totalSiguientes, 1); assert.equal(por.alfred.alerta, null);
   assert.equal(por.alfie.bloqueadas[0].motivo, 'Falta licencia'); assert.equal(por.conchi.alerta, 'sin_actualizar_24h'); assert.equal(por.conchi.horasSinActualizar, 49);
   assert.equal(por.hark.alerta, 'sin_tareas_publicadas'); assert.equal(por.amalia.ultimaActualizacion, null);
-  assert.deepEqual(r.conAlerta.map(x => x.agente).sort(), ['amalia', 'conchi', 'hark', 'lola']);
+  assert.deepEqual(r.conAlerta.map(x => x.agente).sort(), ['amalia', 'conchi', 'hark', 'lola', 'rene']);
 });
 
 test('estadoPanel: en pausa con tanda programada; bloqueado solo si depende del propio agente', async () => {
