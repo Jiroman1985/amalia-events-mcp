@@ -6,10 +6,11 @@
 import { writeFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { FirestoreStore } from './firestore-store.mjs';
-import { clavesDeEvento } from './clave-sesion.mjs';
+import { clavesDeEvento, setAliasDinamico } from './clave-sesion.mjs';
 import { completitud } from './auditoria-duplicados.mjs';
 const arg = k => { const i = process.argv.indexOf('--' + k); return i < 0 ? null : (process.argv[i + 1] ?? true); };
 const store = new FirestoreStore({ project: process.env.FIRESTORE_PROJECT_ID, key: process.env.FIREBASE_API_KEY, credentialsFile: process.env.GOOGLE_APPLICATION_CREDENTIALS });
+setAliasDinamico((await store.list('municipio_alias', { limit: 500 }).catch(() => [])).map(r => r.data));
 const eventos = await store.listAll('eventos', { max: 50000 });
 const existentes = new Map((await store.listAll('sesiones_clave', { max: 100000 })).map(r => [r.id, r]));
 const deseadas = new Map(), choques = [];

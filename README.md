@@ -164,3 +164,10 @@ Pruebas reproducibles: `FIRESTORE_EMULATOR_HOST=127.0.0.1:8686 AMALIA_TEST_PUBLI
 - `fusionarPar` es **un solo commit atómico** (`FirestoreStore.writeMany`): rellena huecos de la conservada, **mueve las sesiones** que solo tenía la otra, retira la otra y traspasa/libera las claves. `simular` devuelve campos, sesiones, claves y conflictos y comprueba permisos. Ya no pasa por el escaneo de duplicados (adiós `duplicate_event_conflict` contra el propio par).
 - Municipio con alias (`Lumbier/Irunberri`, `Donostia`/`San Sebastián`…, tabla ampliable en `clave-sesion.mjs`); una clave por **día** en rangos `fechaLocal`–`fechaFinLocal` (hasta 31 días); el tipo de recinto (teatro, auditorio, museo, iglesia, plaza…) ya no se quita; fecha/hora de eventos antiguos desde `dateTime` en hora de Madrid.
 - `rellenar_claves.mjs`: lo que sobra se libera, no se borra.
+
+## 2.25.3 — reservas sin borrado, alias ampliados, editar_negocio, temporadas (SIGUE EN SOMBRA)
+
+- `moveReserve`: la reserva de origen vieja se **libera** (`estado:'liberada'`, con precondición de versión) y la nueva se crea o retoma una liberada; una reserva liberada equivale a no existir en todas las lecturas. La cuenta de servicio no borra.
+- Alias de municipio: tabla fija ampliada (Navarra, País Vasco, Galicia, Cataluña, Comunitat Valenciana, Baleares) sin abreviaturas ambiguas (`sanlucar`, `castellon`, `hospitalet`…) y colección `municipio_alias`: un municipio «A/B» en un evento o negocio guarda A↔B automáticamente y la clave lo lee (caché 5 min).
+- `editar_negocio` (permiso `edit`, `simular`, `expectedVersion`, motivo): nombre, dirección, sitioWeb y redes; historial en `negocios/{id}/revisiones`.
+- Temporadas: un rango de más de 31 días no genera clave por día ni del primer día: una única marca `temporada` por evento; la auditoría la compara con cualquier sesión del mismo municipio y recinto dentro del rango (título parecido).

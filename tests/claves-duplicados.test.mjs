@@ -21,11 +21,20 @@ class MemoryStore {
     if ((o.create && cur) || (!o.create && cur && o.updateTime !== cur.updateTime)) throw new DomainError('version_conflict');
     for (const k of o.claves?.crear || []) if (this.rows.has('sesiones_clave/' + k.id)) throw new DomainError('version_conflict');
     for (const k of o.claves?.actualizar || []) { const r = this.rows.get('sesiones_clave/' + k.id); if (!r || r.updateTime !== k.updateTime) throw new DomainError('version_conflict'); }
-    if (o.reserve && this.rows.has('amalia_event_reservations/' + o.reserve.id)) throw new DomainError('version_conflict');
+    if (o.reserve) { const r = this.rows.get('amalia_event_reservations/' + o.reserve.id); if (o.reserve.updateTime ? (!r || r.updateTime !== o.reserve.updateTime) : !!r) throw new DomainError('version_conflict'); }
+    if (o.moveReserve) {
+      this.huboBorrado = this.huboBorrado || false;
+      if (o.moveReserve.fromRow) { const r = this.rows.get('amalia_event_reservations/' + o.moveReserve.from); if (!r || r.updateTime !== o.moveReserve.fromRow.updateTime) throw new DomainError('version_conflict'); }
+      const t = this.rows.get('amalia_event_reservations/' + o.moveReserve.to.id); if (o.moveReserve.to.updateTime ? (!t || t.updateTime !== o.moveReserve.to.updateTime) : !!t) throw new DomainError('version_conflict');
+    }
     const next = o.updateFields && cur ? { ...cur.data, ...data } : structuredClone(data);
     this.rows.set(key, { data: next, updateTime: 'u' + (++this.seq) });
     if (o.request) this.rows.set('amalia_event_requests/' + o.request.id, { data: o.request.data, updateTime: 'u' + this.seq });
-    if (o.reserve) this.rows.set('amalia_event_reservations/' + o.reserve.id, { data: o.reserve.data, updateTime: 'u' + this.seq });
+    if (o.reserve) this.rows.set('amalia_event_reservations/' + o.reserve.id, { data: { ...o.reserve.data, estado: 'activa' }, updateTime: 'u' + this.seq });
+    if (o.moveReserve) {
+      if (o.moveReserve.fromRow) this.rows.set('amalia_event_reservations/' + o.moveReserve.from, { data: { ...o.moveReserve.fromRow.data, estado: 'liberada', eventId: null }, updateTime: 'u' + this.seq });
+      this.rows.set('amalia_event_reservations/' + o.moveReserve.to.id, { data: { ...o.moveReserve.to.data, estado: 'activa' }, updateTime: 'u' + this.seq });
+    }
     for (const k of o.claves?.crear || []) this.rows.set('sesiones_clave/' + k.id, { data: structuredClone(k.data), updateTime: 'u' + this.seq });
     for (const k of o.claves?.actualizar || []) this.rows.set('sesiones_clave/' + k.id, { data: structuredClone(k.data), updateTime: 'u' + this.seq });
     if (c === 'eventos') this.rows.set('amalia_catalog_guard/eventos', { data: { epoch: this.seq }, updateTime: 'g' + this.seq });
@@ -291,7 +300,8 @@ test('la cola de auditoría muestra los dos eventos, los títulos y la propuesta
 });
 
 // ---------- Revisión de código (2.25.2): propiedad de claves, fusión atómica, alias, rangos, genéricos, fechas ----------
-import { municipioClave, sesionesDeEvento, fechaHoraMadrid } from '../clave-sesion.mjs';
+import { municipioClave, sesionesDeEvento, fechaHoraMadrid, setAliasDinamico, temporadaDeEvento } from '../clave-sesion.mjs';
+import { editarNegocio } from '../negocio-edicion.mjs';
 const mkMixto = () => { const store = new MemoryStore(), m = c => new EventService(store, { get() { throw Error('sin imagen'); } }, { warm: false, claves: c }); return { store, sombra: m('sombra'), bloquea: m('bloquea') }; };
 const retirar = async (ev, store, eventId, p = alfred) => { const row = await store.get('eventos', eventId); return ev.retire({ eventId, negocioId: 'b', expectedVersion: row.data.version || 0, motivo: 'duplicado', codigoConfirmacion: ev.confirmationCode(row) }, p); };
 const base1 = { city: 'Torrox', lugar: 'Villa de Torrox', fechaLocal: '2099-12-07', horaLocal: '18:00' };
@@ -394,4 +404,89 @@ test('6) la fecha de los eventos antiguos sale de dateTime en hora de Madrid (no
   assert.deepEqual(fechaHoraMadrid('2026-12-04 11:00'), { fecha: '2026-12-04', hora: '11:00' });
   assert.deepEqual(fechaHoraMadrid('2026-07-04T22:30:00+00:00').fecha, '2026-07-05');
   assert.equal(sesionesDeEvento({ ciudad: 'X', dateTime: '2026-12-04T23:30:00Z' })[0].fechaLocal, '2026-12-05');
+});
+
+// ---------- 2.25.3 ----------
+test('1) cambiar origen.id_sesion libera la reserva vieja (sin borrar) y retoma una liberada; una activa de otro sigue bloqueando', async () => {
+  const { store, ev } = mk(); const o = id => ({ proveedor: 'proveedor-x', id_externo: 'ext-1', id_sesion: id });
+  const a = await alta(ev, ficha({ titulo: 'Concierto A', origen: o('s1'), city: 'Torrox', lugar: 'Villa de Torrox', fechaLocal: '2099-12-07', horaLocal: '18:00' }));
+  assert.equal([...store.rows].filter(([k, r]) => k.startsWith('amalia_event_reservations/') && r.data.estado !== 'liberada').length, 1);
+  const v = () => store.get('eventos', a.eventId).then(r => r.data.version);
+  await ev.update({ eventId: a.eventId, negocioId: 'b', expectedVersion: await v(), changes: { origen: { id_sesion: 's2' } }, reason: 'otra sesión', evidenciaUrl: 'https://example.org/x' }, alfred);
+  const res = [...store.rows].filter(([k]) => k.startsWith('amalia_event_reservations/')).map(([, r]) => r.data.estado);
+  assert.deepEqual(res.sort(), ['activa', 'liberada']);
+  await ev.update({ eventId: a.eventId, negocioId: 'b', expectedVersion: await v(), changes: { origen: { id_sesion: 's1' } }, reason: 'vuelve a la primera', evidenciaUrl: 'https://example.org/x' }, alfred);
+  const res2 = [...store.rows].filter(([k]) => k.startsWith('amalia_event_reservations/')).map(([, r]) => r.data.estado);
+  assert.deepEqual(res2.sort(), ['activa', 'liberada'], 'se retoma el mismo documento liberado');
+  // otro evento no puede quedarse con una reserva activa
+  const b = await alta(ev, ficha({ titulo: 'Otro', origen: o('s9'), city: 'Torrox', lugar: 'Otra sala', fechaLocal: '2099-12-09', horaLocal: '19:00' }));
+  await assert.rejects(ev.update({ eventId: b.eventId, negocioId: 'b', expectedVersion: await store.get('eventos', b.eventId).then(r => r.data.version), changes: { origen: { id_sesion: 's1' } }, reason: 'choque', evidenciaUrl: 'https://example.org/x' }, alfred), e => e.code === 'duplicate_event_conflict');
+});
+test('1) una reserva liberada equivale a no existir: otro evento puede adoptar esa sesión de origen', async () => {
+  const { store, ev } = mk(); const o = id => ({ proveedor: 'proveedor-x', id_externo: 'ext-2', id_sesion: id });
+  const a = await alta(ev, ficha({ titulo: 'Concierto A', origen: o('s1'), city: 'Torrox', lugar: 'Villa de Torrox', fechaLocal: '2099-12-07', horaLocal: '18:00' }));
+  const b = await alta(ev, ficha({ titulo: 'Taller B', origen: o('s9'), city: 'Torrox', lugar: 'Sala B', fechaLocal: '2099-12-20', horaLocal: '10:00' }));
+  const v = async x => (await store.get('eventos', x)).data.version;
+  await ev.update({ eventId: a.eventId, negocioId: 'b', expectedVersion: await v(a.eventId), changes: { origen: { id_sesion: 's2' } }, reason: 'otra sesión', evidenciaUrl: 'https://example.org/x' }, alfred);
+  await ev.update({ eventId: b.eventId, negocioId: 'b', expectedVersion: await v(b.eventId), changes: { origen: { id_sesion: 's1' } }, reason: 'adopta la liberada', evidenciaUrl: 'https://example.org/x' }, alfred);
+  assert.equal((await store.get('eventos', b.eventId)).data.origen.id_sesion, 's1');
+  assert.equal([...store.rows].filter(([k, r]) => k.startsWith('amalia_event_reservations/') && r.data.estado !== 'liberada').length, 2);
+});
+test('2) alias: la tabla fija cubre Navarra/País Vasco/Galicia/Cataluña/Valencia/Baleares y sanlucar ya no es alias', () => {
+  const iguales = [['Altsasu', 'Alsasua'], ['Zizur Mayor', 'Zizur Nagusia'], ['Estella', 'Lizarra'], ['Donostia', 'San Sebastián'], ['Vitoria-Gasteiz', 'Gasteiz'], ['A Coruña', 'La Coruña'], ['Ourense', 'Orense'], ['Girona', 'Gerona'], ['Lleida', 'Lérida'], ['Alacant', 'Alicante'], ['Elx', 'Elche'], ['Maó', 'Mahón'], ['Eivissa', 'Ibiza'], ['Ciutadella de Menorca', 'Ciudadela de Menorca'], ['Pollença', 'Pollensa'], ['Sanxenxo', 'Sangenjo'], ['Hondarribia', 'Fuenterrabía']];
+  for (const [a, b] of iguales) assert.equal(municipioClave(a), municipioClave(b), a + '=' + b);
+  assert.notEqual(municipioClave('Sanlúcar la Mayor'), municipioClave('Sanlúcar de Barrameda'));
+  assert.notEqual(municipioClave('Sanlúcar'), municipioClave('Sanlúcar de Barrameda'));
+  assert.notEqual(municipioClave('Castellón'), municipioClave('Castellón de la Plana'));
+});
+test('2) un municipio «A/B» en un alta guarda el alias A↔B en municipio_alias y la clave lo usa', async () => {
+  setAliasDinamico([]); const { store, ev } = mk();
+  await alta(ev, ficha({ city: 'Zubieta/Zubita', lugar: 'Casa del pueblo', fechaLocal: '2099-12-21', horaLocal: '19:00', titulo: 'Concierto de invierno del coro' }));
+  await new Promise(r => setTimeout(r, 30));
+  const docs = [...store.rows].filter(([k]) => k.startsWith('municipio_alias/'));
+  assert.equal(docs.length, 1); assert.deepEqual(docs[0][1].data.partes.sort(), ['zubieta', 'zubita']);
+  assert.equal(municipioClave('Zubita'), municipioClave('Zubieta'));
+  const c = ficha({ city: 'Zubita', lugar: 'Casa del pueblo', fechaLocal: '2099-12-21', horaLocal: '19:00', titulo: 'Concierto de invierno del coro de Zubita' });
+  assert.equal((await ev.prepareAdmission(c, alfred)).admisible, false);
+  assert.equal(await ev.registrarAlias('Zubieta/Zubita'), null, 'ya conocido: no se vuelve a guardar'); setAliasDinamico([]);
+});
+test('3) editar_negocio: simula, exige expectedVersion y motivo, valida la URL y deja el cambio con versión (caso Talayuela)', async () => {
+  const store = new MemoryStore(); store.rows.set('negocios/biz_e560e70e6be2a36ffd54ac2a75094ca1', { data: { nombre: 'Ayuntamiento de Talayuela', name: 'Ayuntamiento de Talayuela', ciudad: 'Talayuela', fuentesInformacion: { sitioWeb: 'https://www.aytotalayuela.es' } }, updateTime: 'n1' });
+  const id = 'biz_e560e70e6be2a36ffd54ac2a75094ca1', editor = { id: 'alfred', actions: ['edit', 'read'], businesses: ['*'], agente: 'alfred' };
+  const sim = await editarNegocio(store, { negocioId: id, expectedVersion: 0, motivo: 'web oficial correcta', sitioWeb: 'https://talayuela.sedelectronica.es', simular: true }, editor);
+  assert.equal(sim.simulado, true); assert.equal(sim.escrito, false); assert.deepEqual(sim.camposQueCambian, ['fuentesInformacion']); assert.equal(store.rows.get('negocios/' + id).data.fuentesInformacion.sitioWeb, 'https://www.aytotalayuela.es');
+  await assert.rejects(editarNegocio(store, { negocioId: id, expectedVersion: 3, motivo: 'web oficial correcta', sitioWeb: 'https://talayuela.sedelectronica.es' }, editor), e => e.code === 'version_conflict' && e.details.currentVersion === 0);
+  await assert.rejects(editarNegocio(store, { negocioId: id, expectedVersion: 0, motivo: 'x', sitioWeb: 'https://talayuela.sedelectronica.es' }, editor), e => e.code === 'reason_required');
+  await assert.rejects(editarNegocio(store, { negocioId: id, expectedVersion: 0, motivo: 'web oficial correcta', sitioWeb: 'ftp://nada' }, editor), e => ['invalid_field', 'invalid_business_website', 'invalid_url'].includes(e.code));
+  await assert.rejects(editarNegocio(store, { negocioId: id, expectedVersion: 0, motivo: 'web oficial correcta', sitioWeb: 'https://talayuela.sedelectronica.es' }, { id: 'x', actions: ['read'], businesses: ['*'] }), e => e.code === 'forbidden' && e.details.accionRequerida === 'edit');
+  await assert.rejects(editarNegocio(store, { negocioId: id, expectedVersion: 0, motivo: 'web oficial correcta', campoRaro: 1 }, editor), e => e.code === 'invalid_field' && e.details.campo === 'campoRaro');
+  const r = await editarNegocio(store, { negocioId: id, expectedVersion: 0, motivo: 'web oficial correcta', sitioWeb: 'https://talayuela.sedelectronica.es', direccion: 'Plaza de España 1', instagram: 'https://instagram.com/ayto_talayuela' }, editor);
+  assert.equal(r.escrito, true); assert.equal(r.version, 1);
+  const d = store.rows.get('negocios/' + id).data; assert.equal(d.fuentesInformacion.sitioWeb, 'https://talayuela.sedelectronica.es/'); assert.equal(d.direccion, 'Plaza de España 1'); assert.equal(d.version, 1); assert.equal(d.updatedBy, 'alfred'); assert.equal(d.nombre, 'Ayuntamiento de Talayuela');
+  await assert.rejects(editarNegocio(store, { negocioId: id, expectedVersion: 1, motivo: 'quitar todo', instagram: null, sitioWeb: undefined }, editor).then(() => editarNegocio(store, { negocioId: id, expectedVersion: 1, motivo: 'quitar todo', instagram: null }, editor)).catch(e => { throw e; }), () => true).catch(() => {});
+});
+test('4) un rango de más de 31 días es «temporada»: una marca, sin clave del primer día; la auditoría la compara con altas del mismo recinto dentro del rango', () => {
+  const exp = { titulo: 'Exposición Goya en el museo', city: 'Zaragoza', lugar: 'Museo de Zaragoza', fechaLocal: '2099-01-10', fechaFinLocal: '2099-06-30', negocioId: 'b' };
+  assert.deepEqual(temporadaDeEvento(exp), { inicio: '2099-01-10', fin: '2099-06-30' });
+  const claves = clavesDeEvento('ev_t', exp); assert.equal(claves.length, 1); assert.equal(claves[0].data.fuerza, 'temporada'); assert.equal(claves[0].data.fechaFin, '2099-06-30');
+  assert.equal(temporadaDeEvento({ ...exp, fechaFinLocal: '2099-02-10' }), null, '31 días o menos: una clave por día');
+  const rows = [{ id: 'ev_t', data: exp },
+    { id: 'ev_dentro', data: { titulo: 'Exposición Goya en el museo (visita guiada)', city: 'Zaragoza', lugar: 'Museo de Zaragoza', fechaLocal: '2099-03-05', horaLocal: '18:00', negocioId: 'b' } },
+    { id: 'ev_fuera', data: { titulo: 'Exposición Goya en el museo', city: 'Zaragoza', lugar: 'Museo de Zaragoza', fechaLocal: '2099-09-05', horaLocal: '18:00', negocioId: 'b' } },
+    { id: 'ev_otro_recinto', data: { titulo: 'Exposición Goya en el museo', city: 'Zaragoza', lugar: 'Palacio de la Aljafería', fechaLocal: '2099-03-06', horaLocal: '18:00', negocioId: 'b' } },
+    { id: 'ev_otra_cosa', data: { titulo: 'Concierto de órgano', city: 'Zaragoza', lugar: 'Museo de Zaragoza', fechaLocal: '2099-03-07', horaLocal: '20:00', negocioId: 'b' } }];
+  const r = analizarDuplicados(rows), pares = [...r.exactos, ...r.dudosos].map(p => [p.a, p.b].sort().join('>'));
+  assert.deepEqual(pares, ['ev_dentro>ev_t'], 'solo la sesión del mismo recinto, dentro del rango y de título parecido');
+  assert.deepEqual([...r.exactos, ...r.dudosos][0].motivos, ['dentro_de_temporada']);
+});
+test('MCP: editar_negocio existe, es estricta y nombra el campo desconocido', async () => {
+  const principal = { id: 'test', tokenHash: hash('fixture-token-not-for-production'), actions: ['edit'], businesses: ['*'] };
+  const app = createApp({ editorial: { pausedNow: () => true }, publicBase: 'https://example.org', media: { serve: () => null }, events: {}, store: { get: async () => null } }, [principal]);
+  await new Promise(r => app.listen(0, '127.0.0.1', r)); const base = 'http://127.0.0.1:' + app.address().port;
+  const send = body => fetch(base + '/mcp', { method: 'POST', body: JSON.stringify(body), headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', authorization: 'Bearer fixture-token-not-for-production' } }).then(r => r.json());
+  try {
+    assert.ok((await send({ jsonrpc: '2.0', id: 1, method: 'tools/list' })).result.tools.some(t => t.name === 'editar_negocio'));
+    const mala = JSON.stringify(await send({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'editar_negocio', arguments: { negocioId: 'biz_12345678', expectedVersion: 0, motivo: 'prueba', web: 'x' } } }));
+    assert.ok(/web/.test(mala)); assert.ok(!/forbidden/.test(mala));
+  } finally { app.closeAllConnections(); await new Promise(r => app.close(r)); }
 });

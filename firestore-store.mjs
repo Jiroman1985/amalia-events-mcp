@@ -104,8 +104,13 @@ export class FirestoreStore {
     if(updateFields)writes[0].updateMask={fieldPaths:updateFields.map(k=>/^[A-Za-z_][A-Za-z0-9_]*$/.test(k)?k:'`'+k.replaceAll('\\','\\\\').replaceAll('`','\\`')+'`')};
     if(audit)writes.push({update:{name:`${this.prefix}/${collection}/${id(key)}/revisiones/v${String(data.version).padStart(8,'0')}`,fields:toFirestoreFields(audit)},currentDocument:{exists:false}});
     if(request)writes.push({update:{name:`${this.prefix}/amalia_event_requests/${id(request.id)}`,fields:toFirestoreFields(request.data)},currentDocument:{exists:false}});
-    if(reserve)writes.push({update:{name:`${this.prefix}/amalia_event_reservations/${id(reserve.id)}`,fields:toFirestoreFields(reserve.data)},currentDocument:{exists:false}});
-    if(moveReserve){writes.push({delete:`${this.prefix}/amalia_event_reservations/${id(moveReserve.from)}`,currentDocument:{exists:true}});writes.push({update:{name:`${this.prefix}/amalia_event_reservations/${id(moveReserve.to.id)}`,fields:toFirestoreFields(moveReserve.to.data)},currentDocument:{exists:false}});}
+    if(reserve)writes.push({update:{name:`${this.prefix}/amalia_event_reservations/${id(reserve.id)}`,fields:toFirestoreFields({...reserve.data,estado:'activa'})},currentDocument:reserve.updateTime?{updateTime:reserve.updateTime}:{exists:false}});
+    // La cuenta de servicio no puede borrar: la reserva vieja se LIBERA (estado:'liberada', con precondición de versión) y la nueva se crea o, si existía liberada, se retoma con su versión.
+    if(moveReserve){
+      if(moveReserve.fromRow&&!moveReserve.fromRow.updateTime)fail('reserva_version_missing');
+      if(moveReserve.fromRow)writes.push({update:{name:`${this.prefix}/amalia_event_reservations/${id(moveReserve.from)}`,fields:toFirestoreFields({...moveReserve.fromRow.data,estado:'liberada',eventIdAnterior:moveReserve.fromRow.data.eventId??null,eventId:null,liberadaEn:new Date().toISOString()})},currentDocument:{updateTime:moveReserve.fromRow.updateTime}});
+      writes.push({update:{name:`${this.prefix}/amalia_event_reservations/${id(moveReserve.to.id)}`,fields:toFirestoreFields({...moveReserve.to.data,estado:'activa'})},currentDocument:moveReserve.to.updateTime?{updateTime:moveReserve.to.updateTime}:{exists:false}});
+    }
     this.clavesWrites(writes,claves,collection==='eventos');
     const uniqueVerifies=new Map();for(const v of verifies){const name=v.collection+'/'+v.key,prior=uniqueVerifies.get(name);if(prior&&prior.updateTime!==v.updateTime)fail('version_conflict');uniqueVerifies.set(name,v);}
     for(const v of uniqueVerifies.values()){if(!v.updateTime)fail('program_document_version_missing');writes.push({verify:`${this.prefix}/${id(v.collection)}/${id(v.key)}`,currentDocument:{updateTime:v.updateTime}});}

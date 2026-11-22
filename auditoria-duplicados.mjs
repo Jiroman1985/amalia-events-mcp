@@ -1,5 +1,5 @@
 // auditoria-duplicados.mjs — análisis puro de duplicados sobre el catálogo (job nocturno y ensayos). No escribe nada.
-import { claveSesion, clavesDeEvento, decidirSesion, tituloParecido, tituloIgual, sesionesDeEvento } from './clave-sesion.mjs';
+import { claveSesion, clavesDeEvento, decidirSesion, tituloParecido, tituloIgual, sesionesDeEvento, recintosCompatibles } from './clave-sesion.mjs';
 import { leg } from './dedup_amalia.mjs';
 
 /** Puntuación de completitud para elegir la ficha que se conserva. */
@@ -29,6 +29,17 @@ export function analizarDuplicados(rows, { prueba = false } = {}) {
     const dec = decidirSesion(x, [y]); if (dec.decision === 'libre') continue;
     const k = [x.eventId, y.eventId].sort().join('>'); const cur = pares.get(k);
     if (!cur || (dec.decision === 'bloquea' && cur.decision !== 'bloquea')) pares.set(k, { a: x.eventId, b: y.eventId, decision: dec.decision, motivos: dec.motivos.map(m => m.motivo), clave: x.clave, fuerte: x.fuerza === 'fuerte' && y.fuerza === 'fuerte' });
+  }
+  // Temporadas (rangos de más de 31 días): cualquier sesión del mismo municipio y recinto DENTRO del rango con título parecido es dudosa.
+  const temporadas = items.filter(i => i.fuerza === 'temporada'), sueltas = items.filter(i => i.fuerza !== 'temporada');
+  for (const t of temporadas) {
+    if (!t.recinto) continue;
+    for (const x of [...sueltas, ...temporadas]) {
+      if (x.eventId === t.eventId || x.municipio !== t.municipio || !x.recinto || !recintosCompatibles(t.recinto, x.recinto)) continue;
+      const dentro = x.fuerza === 'temporada' ? (x.fecha <= t.fechaFin && x.fechaFin >= t.fecha) : (x.fecha >= t.fecha && x.fecha <= t.fechaFin);
+      if (!dentro || !tituloParecido(t.tituloOriginal, x.tituloOriginal)) continue;
+      const k = [t.eventId, x.eventId].sort().join('>'); if (!pares.has(k)) pares.set(k, { a: t.eventId, b: x.eventId, decision: 'cola', motivos: ['dentro_de_temporada'], clave: t.clave, fuerte: false });
+    }
   }
   const exactos = [], dudosos = [];
   for (const p of pares.values()) {

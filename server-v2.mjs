@@ -25,6 +25,7 @@ import { fusionarFuentes } from './fusion-fuentes.mjs';
 import { marcarRevisada,listarVencidas,resumenFuentes,buscarFichas } from './fuentes-consultas.mjs';
 import { TIPOS as FUENTE_TIPOS_V2,ESTADOS as FUENTE_ESTADOS } from './fuentes-modelo.mjs';
 import { crearLead,listarLeads } from './negocio-lead.mjs';
+import { editarNegocio } from './negocio-edicion.mjs';
 
 // Red de seguridad: un error de socket suelto (p. ej. al descargar una imagen de un host inalcanzable) no debe tumbar el servidor.
 const ERRORES_RED=new Set(['ENETUNREACH','EHOSTUNREACH','ECONNRESET','ECONNREFUSED','ETIMEDOUT','EPIPE','EADDRNOTAVAIL','ENOTFOUND','EAI_AGAIN','ERR_TLS_CERT_ALTNAME_INVALID']);
@@ -32,7 +33,7 @@ process.on('uncaughtException',err=>{console.error(JSON.stringify({event:'uncaug
 process.on('unhandledRejection',reason=>{console.error(JSON.stringify({event:'unhandled_rejection',code:reason?.code||null,message:String(reason?.message||reason).slice(0,200)}));});
 
 
-export const VERSION='2.25.2';
+export const VERSION='2.25.3';
 const ID=z.string().regex(/^[A-Za-z0-9_-]{1,128}$/),BUSINESS={negocioId:ID},EVENT={...BUSINESS,eventId:ID},PIECE={...BUSINESS,pieceId:ID};
 const RIGHTS=z.object({status:z.enum(['unknown','owned','licensed','permission','public_domain']),evidence:z.string().max(2000).optional(),credit:z.string().max(500).optional()});
 const SOURCE=z.object({url:z.string().url(),checkedAt:z.string().datetime({offset:true}).nullable().optional(),sourceId:z.string().max(300).optional()});
@@ -58,7 +59,7 @@ const PROGRAM=z.object({url:z.string().url(),directorioUrl:z.string().url(),enla
 const response=value=>({content:[{type:'text',text:JSON.stringify(value)}],structuredContent:{result:value}});
 const TOOL_DEADLINE_MS=Number(process.env.AMALIA_TOOL_DEADLINE_MS||55000);
 // Herramientas que rechazan campos desconocidos con un error de validación que nombra el campo (nunca forbidden ni descarte silencioso).
-const ESTRICTAS=new Set(['preparar_admision','admitir_candidato','buscar_duplicados_global','editar_evento','completar_evento','retirar_evento','recuperar_evento','listar_revision_candidatos','resolver_revision_candidato']);
+const ESTRICTAS=new Set(['editar_negocio','preparar_admision','admitir_candidato','buscar_duplicados_global','editar_evento','completar_evento','retirar_evento','recuperar_evento','listar_revision_candidatos','resolver_revision_candidato']);
 function expose(m,name,description,schema,fn,readOnly=false){m.registerTool(name,{description,inputSchema:ESTRICTAS.has(name)?z.object(schema).strict():schema,annotations:{readOnlyHint:readOnly,destructiveHint:name==='programar_pieza',openWorldHint:true}},async input=>{try{return response(await conPlazo(fn(input),TOOL_DEADLINE_MS,'operation_timeout',{operacion:name}));}catch(e){const code=e instanceof DomainError?e.code:'operation_failed';const referencia=randomUUID();console.error(JSON.stringify({event:'mcp_operation_error',referencia,operacion:name,error:code,etapa:e instanceof DomainError?e.details?.etapa:undefined,causa:e instanceof DomainError?e.details?.causa:undefined,...(e instanceof DomainError?{}:{excepcion:String(e?.name||'Error').slice(0,60),mensaje:String(e?.message||'').slice(0,200),donde:String(e?.stack||'').split('\n').find(l=>/at /.test(l))?.trim().slice(0,200)})}));return {isError:true,...response({error:code,operacion:name,referencia,...(e instanceof DomainError?e.details:{}),...(e instanceof DomainError&&e.details?.ayuda?{}:{ayuda:'Comprueba el estado antes de reintentar; indica la referencia al administrador si persiste.'})})};}});}
 
 export function buildMcp(ctx,principal){
@@ -101,8 +102,10 @@ export function buildMcp(ctx,principal){
   const candidates=await diagnosticStage('negocio_consulta',()=>store.list('negocios',{name:input.nombre,limit:20}));if(candidates.length&&!input.allowDuplicate)return {created:false,reason:'possible_duplicate',candidates:candidates.map(r=>({negocioId:r.id,nombre:r.data.nombre}))};
   const now=new Date().toISOString(),data={uid:key,nombre:input.nombre,name:input.nombre,ciudad:input.ciudad||null,email:input.email||'',estado:'activo',origenRegistro:'mcp_scraping',fuentesInformacion:publicSources,fechaCreacion:now,fechaActualizacion:now,createdBy:principal.id,creationFingerprint:fingerprint};
   try{await diagnosticStage('negocio_guardado',()=>store.write('negocios',key,data,{create:true}),{possiblePartial:true});}catch(e){if(e.code!=='version_conflict')throw e;const again=await store.get('negocios',key);if(again?.data.creationFingerprint!==fingerprint)throw e;}
+  Promise.resolve(events.registrarAlias?.(input.ciudad,'negocio')).catch(()=>{});
   return {negocioId:key,created:true,cuentaFirebaseAuth:false};
  });
+ expose(m,'editar_negocio','Corrige datos de un negocio YA registrado (permiso edit): nombre, direccion, sitioWeb (URL https; no se puede quitar) e instagram/facebook/tiktok/youtube (null quita la red). Siempre con motivo (≥3 caracteres) y expectedVersion (la versión actual; un negocio sin ediciones previas es 0). simular=true devuelve qué cambiaría (camposQueCambian y cambios antes/después) sin escribir. Cada cambio queda en el historial con el agente de tu token. El negocio debe conservar al menos una fuente pública.',{negocioId:z.string().min(8).max(80),expectedVersion:z.number().int().min(0),motivo:z.string().min(3).max(500),nombre:z.string().min(2).max(180).optional(),direccion:z.string().min(2).max(200).nullable().optional(),sitioWeb:z.string().url().max(300).optional(),instagram:z.string().max(300).nullable().optional(),facebook:z.string().max(300).nullable().optional(),tiktok:z.string().max(300).nullable().optional(),youtube:z.string().max(300).nullable().optional(),simular:z.boolean().optional()},input=>editarNegocio(store,input,principal));
  expose(m,'crear_evento','Creación directa cerrada. Usa preparar_admision y admitir_candidato con la propuesta exacta.',eventSchema(),()=>fail('direct_creation_disabled',{use:'preparar_admision y admitir_candidato'}));
  expose(m,'resolver_antecedente_programa','Solo propietario/review y retire. Vista previa sin escritura; confirmar exige hash exacto y versión. Retira de forma recuperable una ficha agrupada y registra resolución auditada; sus unidades cubiertas siguen bloqueadas. No acredita fuentes ni permite eludir otros motivos de duplicado.',{...EVENT,programa:PROGRAM,cubiertas:z.array(ID).min(2).max(20),motivo:z.string().min(3).max(500),confirmar:z.boolean().default(false),proposalHash:z.string().regex(/^[a-f0-9]{64}$/).optional(),expectedVersion:z.number().int().optional()},input=>events.resolveProgramAncestor(input,principal));
  expose(m,'preparar_programa_oficial','Solo lectura: captura y acredita programa institucional, enumera unidades literales y sus carencias. SOLO para programas de universidades de Castilla y León acreditadas en el directorio de la Junta (hoy, Universidad de Salamanca); para ayuntamientos u otros organizadores NO sirve (devuelve authority_directory_unsupported con la alternativa): usa preparar_admision y admitir_candidato, una llamada por sesión. Usa cada evento devuelto sin inventar campos; preparar_admision y admitir_candidato revalidan las fuentes, historia e identidad. Rangos semanales y municipio no acreditado se bloquean.',{...BUSINESS,programa:PROGRAM},input=>events.prepareProgram(input,principal),true);
