@@ -165,6 +165,10 @@ Pruebas reproducibles: `FIRESTORE_EMULATOR_HOST=127.0.0.1:8686 AMALIA_TEST_PUBLI
 - Municipio con alias (`Lumbier/Irunberri`, `Donostia`/`San Sebastián`…, tabla ampliable en `clave-sesion.mjs`); una clave por **día** en rangos `fechaLocal`–`fechaFinLocal` (hasta 31 días); el tipo de recinto (teatro, auditorio, museo, iglesia, plaza…) ya no se quita; fecha/hora de eventos antiguos desde `dateTime` en hora de Madrid.
 - `rellenar_claves.mjs`: lo que sobra se libera, no se borra.
 
+## 2.25.7 — precio desconocido en editar_evento (SIGUE EN SOMBRA)
+
+- `editar_evento` acepta `precio` (también `null`), `precioEstado` y `precioDetalle` (texto u objeto), que se traducen a `precioInfo`. `precio:null` o `precioEstado:"desconocido"` deja el precio como desconocido (la app muestra «Consultar precio»). Antes daba `invalid_changes`.
+
 ## 2.25.6 — agente Rene (SIGUE EN SOMBRA)
 
 - `rene` se añade a los agentes conocidos: aparece en el panel (`resumen_tareas`) desde el primer momento. Token con los permisos de Conchi (admit, read, register_source, create_business, complete, board).
