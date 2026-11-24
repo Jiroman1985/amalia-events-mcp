@@ -1,6 +1,10 @@
 // identidad.mjs — identidad única por agente. Cada token (principal) se resuelve a UN agente canónico; el principal original se guarda aparte para auditoría.
 // El mapa vive aquí (y en el dashboard): alias → canónico. Los principales no listados son su propio agente (p. ej. claude-ingesta).
-export const AGENTES = ['alfred', 'alfie', 'conchi', 'amalia', 'hark', 'lola', 'susan', 'rene', 'noodle'];
+export const AGENTES = ['alfred', 'conchi', 'amalia', 'hark', 'lola', 'susan', 'rene', 'noodle'];
+// Agentes dados de baja (24/11/2026: alfie). Ya no son agentes activos (no salen en paneles ni cuentan para «todos»), pero su identidad se sigue reconociendo:
+// createdBy/updatedBy/autor «alfie» de eventos, fuentes, tareas y tablón se siguen leyendo y contando en el historial.
+export const AGENTES_BAJA = ['alfie'];
+export const esAgenteBaja = id => AGENTES_BAJA.includes(agenteCanonico(id));
 export const ALIAS = {
   'alfred-altas': 'alfred', 'alfred-ediciones': 'alfred',
   'amalia-asistente': 'amalia',
@@ -10,6 +14,8 @@ export const ALIAS = {
 };
 export const agenteCanonico = id => { const k = String(id ?? '').toLowerCase().trim(); return ALIAS[k] || k; };
 export const esAgente = id => AGENTES.includes(agenteCanonico(id));
+/** Agente conocido en el historial: activo o dado de baja. */
+export const esAgenteHistorico = id => esAgente(id) || esAgenteBaja(id);
 /** Identidad de un principal autenticado: {agente (canónico), principal (original)}. */
 export const identidadDe = p => ({ agente: p?.agente || agenteCanonico(p?.id), principal: p?.id ?? null });
 /** Decora un principal del registro de acceso con su agente canónico SIN cambiar su id (los recibos y la idempotencia siguen ligados al token original). */

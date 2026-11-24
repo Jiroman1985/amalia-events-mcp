@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { publicarTarea, actualizarTarea, listarTareas, misTareas, resumenTareas } from '../tareas.mjs';
+import { publicarTarea, actualizarTarea, listarTareas, misTareas, resumenTareas, AGENTES_CONOCIDOS } from '../tareas.mjs';
+import { AGENTES } from '../identidad.mjs';
 
 class Store {
   constructor() { this.docs = new Map(); this.writes = []; this.n = 1; }
@@ -77,16 +78,16 @@ test('listado: orden en curso, bloqueadas, siguientes por orden; hechas de los �
 });
 
 test('resumen por agente: ahora, siguientes, bloqueadas y alertas (sin tareas, sin actualizar 24 h)', async () => {
-  const s = new Store(), ahora = Date.UTC(2026, 10, 21, 12, 0, 0), t0 = () => '2026-11-21T11:00:00.000Z', viejo = () => '2026-11-19T11:00:00.000Z';
+  const s = new Store(), noodle = P('noodle', ['read', 'board']), ahora = Date.UTC(2026, 10, 21, 12, 0, 0), t0 = () => '2026-11-21T11:00:00.000Z', viejo = () => '2026-11-19T11:00:00.000Z';
   await publicarTarea(s, { titulo: 'Reparto de zonas', estado: 'en_curso' }, alfred, { now: t0 }); await publicarTarea(s, { titulo: 'Cargar zonas' }, alfred, { now: t0 });
   const c = await publicarTarea(s, { titulo: 'Revisar Soria', estado: 'en_curso' }, conchi, { now: viejo }); void c;
-  const w = await publicarTarea(s, { titulo: 'Taller bloqueado', estado: 'en_curso' }, alfie, { now: t0 }); await actualizarTarea(s, { tareaId: w.tareaId, estado: 'bloqueada', motivoBloqueo: 'Falta licencia' }, alfie, { now: t0 });
+  const w = await publicarTarea(s, { titulo: 'Taller bloqueado', estado: 'en_curso' }, noodle, { now: t0 }); await actualizarTarea(s, { tareaId: w.tareaId, estado: 'bloqueada', motivoBloqueo: 'Falta licencia' }, noodle, { now: t0 });
   const r = await resumenTareas(s, panel, { ahora }); const por = Object.fromEntries(r.agentes.map(a => [a.agente, a]));
-  assert.deepEqual(Object.keys(por).sort(), ['alfie', 'alfred', 'amalia', 'conchi', 'hark', 'lola', 'noodle', 'rene']);
+  assert.deepEqual(Object.keys(por).sort(), ['alfred', 'amalia', 'conchi', 'hark', 'lola', 'noodle', 'rene']);
   assert.equal(por.alfred.enCurso[0].titulo, 'Reparto de zonas'); assert.equal(por.alfred.totalSiguientes, 1); assert.equal(por.alfred.alerta, null);
-  assert.equal(por.alfie.bloqueadas[0].motivo, 'Falta licencia'); assert.equal(por.conchi.alerta, 'sin_actualizar_24h'); assert.equal(por.conchi.horasSinActualizar, 49);
+  assert.equal(por.noodle.bloqueadas[0].motivo, 'Falta licencia'); assert.equal(por.conchi.alerta, 'sin_actualizar_24h'); assert.equal(por.conchi.horasSinActualizar, 49);
   assert.equal(por.hark.alerta, 'sin_tareas_publicadas'); assert.equal(por.amalia.ultimaActualizacion, null);
-  assert.deepEqual(r.conAlerta.map(x => x.agente).sort(), ['amalia', 'conchi', 'hark', 'lola', 'noodle', 'rene']);
+  assert.deepEqual(r.conAlerta.map(x => x.agente).sort(), ['amalia', 'conchi', 'hark', 'lola', 'rene']);
 });
 
 test('estadoPanel: en pausa con tanda programada; bloqueado solo si depende del propio agente', async () => {
@@ -104,4 +105,17 @@ test('estadoPanel: en pausa con tanda programada; bloqueado solo si depende del 
   assert.equal((await est()).hark, 'bloqueado');
   const r = (await resumenTareas(s, alfred, { ahora })).agentes.find(a => a.agente === 'hark');
   assert.equal(r.bloqueadas.find(b => b.esperaA).esperaA, 'alfred');
+});
+
+test('alfie dado de baja: no sale en resumen_tareas ni con alerta, pero sus tareas siguen guardadas y listables', async () => {
+  const s = new Store(), ahora = Date.UTC(2026, 10, 24, 12, 0, 0), t0 = () => '2026-11-20T11:00:00.000Z';
+  // Tareas históricas de alfie (en curso, siguiente y hecha) ya guardadas antes de la baja
+  await publicarTarea(s, { titulo: 'Revisar Cáceres', estado: 'en_curso' }, alfie, { now: t0 }); await publicarTarea(s, { titulo: 'Tanda pendiente' }, alfie, { now: t0 });
+  const h = await publicarTarea(s, { titulo: 'Fuentes de Toledo', estado: 'en_curso' }, alfie, { now: t0 }); await actualizarTarea(s, { tareaId: h.tareaId, estado: 'hecha' }, alfie, { now: t0 });
+  assert.ok([...s.docs.values()].filter(r => r.data.agente === 'alfie').length >= 3);
+  const r = await resumenTareas(s, panel, { ahora });
+  assert.equal(r.agentes.some(a => a.agente === 'alfie'), false); assert.equal(r.conAlerta.some(a => a.agente === 'alfie'), false);
+  assert.deepEqual(r.agentes.map(a => a.agente).sort(), ['alfred', 'amalia', 'conchi', 'hark', 'lola', 'noodle', 'rene']);
+  const l = await listarTareas(s, { agente: 'alfie' }, alfred); assert.ok(l.total >= 3, 'el historial de tareas de alfie sigue consultable');
+  assert.equal(AGENTES.includes('alfie'), false); assert.equal(AGENTES_CONOCIDOS.includes('alfie'), false);
 });

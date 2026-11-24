@@ -36,7 +36,7 @@ const nuevoId = () => 'msg_' + Date.now().toString(36).padStart(9, '0') + random
 
 async function todos(store, col) { const rows = []; let cursor = null; for (;;) { const page = await store.list(col, { cursor, limit: 500 }); if (!Array.isArray(page)) fail('incomplete_scan'); rows.push(...page); if (rows.length > 20000) fail('incomplete_scan'); if (page.length < 500) break; cursor = page.at(-1).id; } return rows; }
 function destinatarios(v, tipo, def) {
-  let d = v == null ? def : v; if (!Array.isArray(d) || d.length < 1 || d.length > 12) fail('board_destinatarios_invalidos', { ayuda: 'Lista de 1 a 12 agentes (alfred, alfie, conchi, amalia, hark, lola…) o ["todos"].' });
+  let d = v == null ? def : v; if (!Array.isArray(d) || d.length < 1 || d.length > 12) fail('board_destinatarios_invalidos', { ayuda: 'Lista de 1 a 12 agentes (alfred, conchi, amalia, hark, lola, rene, noodle…) o ["todos"].' });
   d = [...new Set(d.map(x => agenteCanonico(String(x).toLowerCase().trim())))]; if (d.some(x => x !== 'todos' && !AGENTE_RE.test(x))) fail('board_destinatarios_invalidos');
   if (A_ALFRED.has(tipo) && !d.includes('alfred') && !d.includes('todos')) d.push('alfred');
   return d;

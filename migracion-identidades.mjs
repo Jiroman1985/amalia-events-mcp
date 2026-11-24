@@ -1,7 +1,7 @@
 // migracion-identidades.mjs — planificación PURA de la unificación de identidades (alias → agente canónico). No lee ni escribe nada.
 // Reglas: no se borra nada; el valor original se conserva en un campo aparte (*_principal / principal) y en eventos solo se AÑADE agenteCanonico (createdBy no se toca).
 import { hash } from './event-domain.mjs';
-import { agenteCanonico, AGENTES } from './identidad.mjs';
+import { agenteCanonico, AGENTES, AGENTES_BAJA } from './identidad.mjs';
 
 const cuenta = (informe, col, alias, campo) => { const c = informe.porColeccion[col] ||= { documentos: 0, cambian: 0, porAlias: {} }; ((c.porAlias[alias] ||= {})[campo] = (c.porAlias[alias][campo] || 0) + 1); };
 const cambia = v => typeof v === 'string' && v && agenteCanonico(v) !== v.toLowerCase().trim() ? agenteCanonico(v) : null;
@@ -17,7 +17,7 @@ export function planificarIdentidades(colecciones) {
         if (!cb) informe.eventos.sinCreatedBy++;
         else {
           const canon = agenteCanonico(cb);
-          if (!AGENTES.includes(canon)) informe.sinMapear[cb] = (informe.sinMapear[cb] || 0) + 1;
+          if (!AGENTES.includes(canon) && !AGENTES_BAJA.includes(canon)) informe.sinMapear[cb] = (informe.sinMapear[cb] || 0) + 1;
           else if (d.agenteCanonico === canon) informe.eventos.yaTienen++;
           else { informe.eventos.aAnadir++; cuenta(informe, col, cb, 'agenteCanonico'); set.agenteCanonico = canon; }
         }

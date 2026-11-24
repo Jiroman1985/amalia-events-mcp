@@ -165,6 +165,12 @@ Pruebas reproducibles: `FIRESTORE_EMULATOR_HOST=127.0.0.1:8686 AMALIA_TEST_PUBLI
 - Municipio con alias (`Lumbier/Irunberri`, `Donostia`/`San Sebastián`…, tabla ampliable en `clave-sesion.mjs`); una clave por **día** en rangos `fechaLocal`–`fechaFinLocal` (hasta 31 días); el tipo de recinto (teatro, auditorio, museo, iglesia, plaza…) ya no se quita; fecha/hora de eventos antiguos desde `dateTime` en hora de Madrid.
 - `rellenar_claves.mjs`: lo que sobra se libera, no se borra.
 
+## 2.25.18 — baja del agente alfie (SIGUE EN SOMBRA)
+
+- `alfie` sale de `AGENTES` (identidad.mjs) y de `AGENTES_CONOCIDOS` (tareas.mjs): ya no aparece en `resumen_tareas` ni genera la alerta `sin_tareas_publicadas`, y no cuenta como lector de los avisos a «todos». `AGENTES_BAJA = ['alfie']` conserva su identidad: `agenteCanonico('alfie')` sigue siendo `alfie`, y createdBy/updatedBy/autor «alfie» se siguen leyendo y contando en listados de días pasados; sus tareas siguen guardadas y listables con `listar_tareas`.
+- Token de `alfie` revocado (entrada eliminada de `access.json`: 401). Los demás no se tocan.
+- La fuente activa con responsable alfie pasa a noodle (actualizar_fuente, con motivo y auditoría); las fusionadas conservan su responsable histórico.
+
 ## 2.25.17 — requiere_atencion guardado en Firestore (SIGUE EN SOMBRA)
 
 - Campo booleano **`requiere_atencion`** en el documento **raíz** de cada hilo de la colección **`tablon_agentes`** (las respuestas no lo llevan). Valor = abierto && urgente && (tipo duda, ayuda o cambio_zona, o con `espera_a`).

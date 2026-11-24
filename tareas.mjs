@@ -3,11 +3,11 @@
 import { randomBytes } from 'node:crypto';
 import { fail, authorize } from './event-domain.mjs';
 import { agenteDe, esAdminTablon } from './tablon.mjs';
-import { agenteCanonico } from './identidad.mjs';
+import { agenteCanonico, AGENTES_BAJA } from './identidad.mjs';
 
 export const COL = 'tareas_agentes';
 export const ESTADOS = ['en_curso', 'siguiente', 'bloqueada', 'hecha', 'cancelada'];
-export const AGENTES_CONOCIDOS = ['alfred', 'alfie', 'conchi', 'amalia', 'hark', 'lola', 'rene', 'noodle'];
+export const AGENTES_CONOCIDOS = ['alfred', 'conchi', 'amalia', 'hark', 'lola', 'rene', 'noodle'];
 const MAX_EN_CURSO = 5, MAX_SIGUIENTES = 40, HORAS_SIN_ACTUALIZAR = 24, DIAS_HECHAS = 7;
 const AGENTE_RE = /^[a-z0-9_-]{2,40}$/, HORA_MS = 3600000, DIA_MS = 86400000;
 const TRANSICIONES = { siguiente: ['en_curso', 'cancelada', 'bloqueada'], en_curso: ['hecha', 'bloqueada', 'siguiente', 'cancelada'], bloqueada: ['en_curso', 'siguiente', 'cancelada'], hecha: [], cancelada: [] };
@@ -90,7 +90,8 @@ export async function misTareas(store, principal, opts) { leer(principal); retur
 /** Resumen por agente para el dashboard: qué hace ahora, qué viene y quién no ha publicado o actualizado nada. */
 export async function resumenTareas(store, principal, { ahora = Date.now() } = {}) {
   leer(principal); const ts = (await todas(store)).map(r => r.data), por = new Map(AGENTES_CONOCIDOS.map(a => [a, []]));
-  for (const d of ts) (por.get(d.agente) || por.set(d.agente, []).get(d.agente)).push(d);
+  // Los agentes dados de baja no salen en el resumen (sus tareas se conservan en tareas_agentes y siguen listándose con listar_tareas).
+  for (const d of ts) { if (AGENTES_BAJA.includes(d.agente)) continue; (por.get(d.agente) || por.set(d.agente, []).get(d.agente)).push(d); }
   const agentes = [...por].map(([agente, l]) => {
     const enCurso = l.filter(d => d.estado === 'en_curso'), sig = l.filter(d => d.estado === 'siguiente'), blq = l.filter(d => d.estado === 'bloqueada'), hechas = l.filter(d => d.estado === 'hecha' && Date.parse(d.terminada_en) >= ahora - DIAS_HECHAS * DIA_MS);
     const ult = l.map(d => d.actualizada_en).sort().at(-1) || null, horas = ult ? Math.floor((ahora - Date.parse(ult)) / HORA_MS) : null;
