@@ -4,7 +4,7 @@
 import { randomBytes } from 'node:crypto';
 import { fail, authorize, hash } from './event-domain.mjs';
 import { normalizeName } from './registro-fuentes.mjs';
-import { agenteCanonico, AGENTES } from './identidad.mjs';
+import { agenteCanonico, AGENTES, dadosDeBaja } from './identidad.mjs';
 
 export const COL = 'tablon_agentes', LEC = 'tablon_lecturas';
 export const TIPOS = ['duda', 'ayuda', 'aviso', 'asignacion', 'cambio_zona', 'evento', 'decision', 'respuesta', 'nota'];
@@ -38,6 +38,7 @@ async function todos(store, col) { const rows = []; let cursor = null; for (;;) 
 function destinatarios(v, tipo, def) {
   let d = v == null ? def : v; if (!Array.isArray(d) || d.length < 1 || d.length > 12) fail('board_destinatarios_invalidos', { ayuda: 'Lista de 1 a 12 agentes (alfred, conchi, amalia, hark, lola, rene, noodle…) o ["todos"].' });
   d = [...new Set(d.map(x => agenteCanonico(String(x).toLowerCase().trim())))]; if (d.some(x => x !== 'todos' && !AGENTE_RE.test(x))) fail('board_destinatarios_invalidos');
+  const baja = dadosDeBaja(d); if (baja.length) fail('board_destinatario_baja', { agentes: baja, ayuda: 'Los agentes de baja (' + baja.join(', ') + ') ya no pueden recibir mensajes: dirígelo a otro agente activo (p. ej. noodle) o a ["todos"].' });
   if (A_ALFRED.has(tipo) && !d.includes('alfred') && !d.includes('todos')) d.push('alfred');
   return d;
 }
@@ -70,7 +71,7 @@ export async function responder(store, input, principal, { now = () => new Date(
   const raiz = await store.get(COL, input.hilo); if (!raiz || raiz.data.es_raiz !== true) fail('board_hilo_no_encontrado', { hilo: input.hilo });
   if (raiz.data.estado === 'resuelto' && !esAdminTablon(principal)) fail('board_hilo_resuelto', { ayuda: 'El hilo está resuelto: abre uno nuevo y referencia este, o pídeselo a Alfred.' });
   const tipo = input.tipo || 'respuesta'; if (!TIPOS.includes(tipo) || tipo === 'decision') fail('board_tipo_invalido', { validos: TIPOS.filter(t => t !== 'decision'), ayuda: 'Las decisiones las registra Alfred con decidir_hilo.' });
-  const yo = agenteDe(principal.id), def = [...new Set([raiz.data.agente, ...raiz.data.destinatarios].filter(x => x && x !== yo))];
+  const yo = agenteDe(principal.id), def = [...new Set([raiz.data.agente, ...raiz.data.destinatarios].map(agenteCanonico).filter(x => x && x !== yo && !dadosDeBaja([x]).length))];
   const id = nuevoId(), d = { id, hilo: raiz.id, es_raiz: false, autor: yo, principal: principal.id, agente: yo, tipo, asunto: raiz.data.asunto, texto: text(input.texto, 1, 2000, 'board_texto_invalido'), destinatarios: destinatarios(input.destinatarios, tipo, def.length ? def : ['todos']), prioridad: raiz.data.prioridad, estado: 'abierto', referencias: referencias(input.referencias), creado_en: now() };
   await store.write(COL, id, d, { create: true });
   await recalcularSeguro(store, raiz.id);
@@ -221,7 +222,7 @@ export async function decidirHilo(store, input, principal, { now = () => new Dat
   if (dec.trim().length > 2000) fail('board_decision_invalida', { campo: 'decision', maximo: 2000, longitud: dec.trim().length, ayuda: '«decision» supera los 2000 caracteres: resúmela.' });
   limita(principal);
   const raiz = await store.get(COL, input.hilo); if (!raiz || raiz.data.es_raiz !== true) fail('board_hilo_no_encontrado', { hilo: input.hilo });
-  const id = nuevoId(), yo = agenteDe(principal.id), def = [...new Set([raiz.data.agente, ...raiz.data.destinatarios].filter(x => x && x !== yo))];
+  const id = nuevoId(), yo = agenteDe(principal.id), def = [...new Set([raiz.data.agente, ...raiz.data.destinatarios].map(agenteCanonico).filter(x => x && x !== yo && !dadosDeBaja([x]).length))];
   await store.write(COL, id, { id, hilo: raiz.id, es_raiz: false, autor: yo, principal: principal.id, agente: yo, tipo: 'decision', asunto: raiz.data.asunto, texto: text(input.decision, 1, 2000, 'board_texto_invalido'), destinatarios: def.length ? def : ['todos'], prioridad: raiz.data.prioridad, estado: 'abierto', referencias: referencias(input.referencias), creado_en: now() }, { create: true });
   if (input.cerrar !== false && raiz.data.estado !== 'resuelto') await cerrar(store, await store.get(COL, raiz.id), principal, { decision_id: id }, now);
   await recalcularSeguro(store, raiz.id);

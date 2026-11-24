@@ -28,7 +28,7 @@ let reloj = 0; const now = () => new Date(Date.UTC(2026, 10, 21, 10, 0, reloj++)
 test('mapa de alias: alfred-altas→alfred, amalia-asistente→amalia; lola y susan preparadas; el resto es su propio agente', () => {
   assert.equal(agenteCanonico('alfred-altas'), 'alfred'); assert.equal(agenteCanonico('Alfred-Ediciones'), 'alfred'); assert.equal(agenteCanonico('amalia-asistente'), 'amalia');
   assert.equal(agenteCanonico('lola-operator'), 'lola'); assert.equal(agenteCanonico('lola'), 'lola'); assert.equal(agenteCanonico('susan'), 'susan'); assert.equal(agenteCanonico('conchi-owner'), 'conchi');
-  for (const a of ['conchi', 'alfie', 'hark', 'amalia', 'alfred']) assert.equal(agenteCanonico(a), a);
+  for (const a of ['conchi', 'rene', 'hark', 'amalia', 'alfred']) assert.equal(agenteCanonico(a), a);
   assert.equal(agenteCanonico('claude-ingesta'), 'claude-ingesta'); assert.equal(esAgente('claude-ingesta'), false); assert.ok(AGENTES.includes('susan') && AGENTES.includes('lola'));
 });
 
@@ -40,16 +40,16 @@ test('autenticación: cada token se resuelve a su agente canónico y conserva el
 });
 
 test('permisos: Alfred decide con cualquiera de sus tokens (con board); el resto no; Lola con board lee y escribe pero no decide', async () => {
-  const s = new Store(), alfredAltas = conIdentidad(P('alfred-altas', ['board'])), alfredEd = conIdentidad(P('alfred-ediciones', ['read', 'edit', 'board'])), lola = conIdentidad(P('lola', ['read', 'board'])), alfie = conIdentidad(P('alfie', ['board'])), sinBoard = conIdentidad(P('alfred-x', ['read']));
-  assert.equal(esAdminTablon(alfredAltas), true); assert.equal(esAdminTablon(alfredEd), true); assert.equal(esAdminTablon(lola), false); assert.equal(esAdminTablon(alfie), false);
+  const s = new Store(), alfredAltas = conIdentidad(P('alfred-altas', ['board'])), alfredEd = conIdentidad(P('alfred-ediciones', ['read', 'edit', 'board'])), lola = conIdentidad(P('lola', ['read', 'board'])), rene = conIdentidad(P('rene', ['board'])), sinBoard = conIdentidad(P('alfred-x', ['read']));
+  assert.equal(esAdminTablon(alfredAltas), true); assert.equal(esAdminTablon(alfredEd), true); assert.equal(esAdminTablon(lola), false); assert.equal(esAdminTablon(rene), false);
   assert.equal(esAdminTablon(conIdentidad(P('alfred', ['read']))), true); // Alfred decide con cualquier token (permiso derivado del agente)
   assert.equal(esAdminTablon(sinBoard), false); // otro agente sin board no
   const d = await publicar(s, { tipo: 'duda', asunto: 'Una duda', texto: 'x' }, lola, { now });
   assert.equal((await decidirHilo(s, { hilo: d.hilo, decision: 'Hazlo así' }, alfredAltas, { now })).decidido, true);
-  const e = await publicar(s, { tipo: 'duda', asunto: 'Otra duda', texto: 'x' }, alfie, { now });
+  const e = await publicar(s, { tipo: 'duda', asunto: 'Otra duda', texto: 'x' }, rene, { now });
   assert.equal(await code(decidirHilo(s, { hilo: e.hilo, decision: 'x' }, lola)), 'forbidden');
-  assert.equal(await code(asignarZona(s, { zona: 'Madrid', agente: 'alfie', motivo: 'reparto' }, lola)), 'forbidden');
-  assert.equal((await asignarZona(s, { zona: 'Madrid', agente: 'alfie', motivo: 'reparto inicial' }, alfredEd, { now })).asignada, true);
+  assert.equal(await code(asignarZona(s, { zona: 'Madrid', agente: 'rene', motivo: 'reparto' }, lola)), 'forbidden');
+  assert.equal((await asignarZona(s, { zona: 'Madrid', agente: 'rene', motivo: 'reparto inicial' }, alfredEd, { now })).asignada, true);
 });
 
 test('tablón: un mismo agente con varios tokens sale con UN nombre (autor, agente y destinatarios) y el principal original queda aparte', async () => {
@@ -93,7 +93,7 @@ test('almacén: la escritura sin mover la guardia solo se permite para agenteCan
 // ---- Zonas jerárquicas ----
 const REPARTO = [
   ...['Málaga', 'Castilla y León', 'La Rioja', 'Aragón'].map(zona => ({ zona, agente: 'conchi' })),
-  ...['Salamanca', 'Extremadura', 'Castilla-La Mancha', 'Comunidad de Madrid'].map(zona => ({ zona, agente: 'alfie' })),
+  ...['Salamanca', 'Extremadura', 'Castilla-La Mancha', 'Comunidad de Madrid'].map(zona => ({ zona, agente: 'rene' })),
   ...['Galicia', 'Asturias', 'Cantabria', 'País Vasco', 'Navarra'].map(zona => ({ zona, agente: 'amalia' })),
   ...['Andalucía', 'Canarias'].map(zona => ({ zona, agente: 'alfred' })),
   ...['Cataluña', 'Comunidad Valenciana', 'Islas Baleares', 'Región de Murcia'].map(zona => ({ zona, agente: 'hark' }))
@@ -109,7 +109,7 @@ test('reparto de Alfred en lote: simular no escribe; aplicar carga las 24 zonas 
   const s = new Store(); const sim = await asignarZonasLote(s, { reparto: REPARTO, motivo: 'Reparto inicial' }, alfred);
   assert.equal(sim.modo, 'simular'); assert.equal(sim.nuevas, REPARTO.length); assert.equal(s.writes.length, 0);
   assert.equal(await code(asignarZonasLote(s, { reparto: REPARTO, motivo: 'Reparto inicial' }, lector)), 'forbidden');
-  assert.equal(await code(asignarZonasLote(s, { reparto: [{ zona: 'Madrid', agente: 'alfie' }, { zona: 'Comunidad de Madrid', agente: 'hark' }], motivo: 'Repetida' }, alfred)), 'board_reparto_invalido');
+  assert.equal(await code(asignarZonasLote(s, { reparto: [{ zona: 'Madrid', agente: 'rene' }, { zona: 'Comunidad de Madrid', agente: 'hark' }], motivo: 'Repetida' }, alfred)), 'board_reparto_invalido');
   const ap = await asignarZonasLote(s, { reparto: REPARTO, motivo: 'Reparto inicial', modo: 'aplicar' }, alfred, { now }); assert.equal(ap.asignadas, REPARTO.length);
   const z = await listarZonas(s, {}, lector); assert.equal(z.total, REPARTO.length); assert.deepEqual(z.porAgente.hark.sort(), ['Cataluña', 'Comunitat Valenciana', 'Illes Balears', 'Murcia']);
   assert.equal((await listar(s, { tipo: 'asignacion' }, lector)).total, 1);
@@ -119,16 +119,16 @@ test('reparto de Alfred en lote: simular no escribe; aplicar carga las 24 zonas 
 test('jerarquía: la asignación más específica prevalece (Salamanca dentro de Castilla y León, Málaga dentro de Andalucía)', async () => {
   const s = new Store(); await asignarZonasLote(s, { reparto: REPARTO, motivo: 'Reparto inicial', modo: 'aplicar' }, alfred, { now });
   const q = async c => (await listarZonas(s, { consultar: c }, lector)).consulta.resuelve;
-  assert.deepEqual([(await q({ provincia: 'Salamanca' })).agente, (await q({ provincia: 'Salamanca' })).nivel], ['alfie', 'provincia']);
+  assert.deepEqual([(await q({ provincia: 'Salamanca' })).agente, (await q({ provincia: 'Salamanca' })).nivel], ['rene', 'provincia']);
   assert.equal((await q({ provincia: 'Burgos' })).agente, 'conchi'); assert.equal((await q({ provincia: 'Burgos' })).zona, 'Castilla y León');
   assert.equal((await q({ provincia: 'Málaga' })).agente, 'conchi'); assert.equal((await q({ provincia: 'Sevilla' })).agente, 'alfred'); assert.equal((await q({ provincia: 'Sevilla' })).zona, 'Andalucía');
-  assert.equal((await q({ municipio: 'Ledesma', provincia: 'Salamanca', ccaa: 'Castilla y León' })).agente, 'alfie'); // municipio sin zona propia → provincia
-  assert.equal((await q({ provincia: 'Madrid' })).agente, 'alfie'); assert.equal((await q({ ccaa: 'Comunidad de Madrid' })).agente, 'alfie');
+  assert.equal((await q({ municipio: 'Ledesma', provincia: 'Salamanca', ccaa: 'Castilla y León' })).agente, 'rene'); // municipio sin zona propia → provincia
+  assert.equal((await q({ provincia: 'Madrid' })).agente, 'rene'); assert.equal((await q({ ccaa: 'Comunidad de Madrid' })).agente, 'rene');
   assert.equal((await q({ provincia: 'Ourense' })).agente, 'amalia'); assert.equal((await q({ provincia: 'Girona' })).agente, 'hark'); assert.equal((await q({ provincia: 'Las Palmas' })).agente, 'alfred');
   assert.equal(await q({ provincia: 'Segovia' }).then(r => r.agente), 'conchi'); assert.equal((await q({ ccaa: 'Canarias' })).agente, 'alfred');
   // un municipio con su propia asignación gana a la provincia
   await asignarZona(s, { zona: 'Béjar', agente: 'hark', motivo: 'Caso especial' }, alfred, { now });
-  assert.equal((await q({ municipio: 'Béjar', provincia: 'Salamanca' })).agente, 'hark'); assert.equal((await q({ municipio: 'Ledesma', provincia: 'Salamanca' })).agente, 'alfie');
+  assert.equal((await q({ municipio: 'Béjar', provincia: 'Salamanca' })).agente, 'hark'); assert.equal((await q({ municipio: 'Ledesma', provincia: 'Salamanca' })).agente, 'rene');
   assert.equal((await q({})) ?? null, null);
   assert.deepEqual(ubicacionDe({ municipio: 'Vigo', provincia: 'Galicia' }).region, 'Galicia'); // «Galicia» escrito en provincia es la comunidad
 });
@@ -144,23 +144,23 @@ test('fuentes sin responsable: se reparten por provincia o comunidad según el r
   await asignarZonasLote(s, { reparto: REPARTO, motivo: 'Reparto inicial', modo: 'aplicar' }, alfred, { now });
   assert.equal(await code(repartirFuentes(s, {}, lector)), 'forbidden');
   const sim = await repartirFuentes(s, {}, alfred); const antes = s.writes.length;
-  assert.equal(sim.modo, 'simular'); assert.equal(sim.candidatas, 8); assert.equal(sim.fuentesQueCambian, 6); assert.deepEqual(sim.porAgente, { alfie: 1, conchi: 2, alfred: 1, amalia: 2 });
+  assert.equal(sim.modo, 'simular'); assert.equal(sim.candidatas, 8); assert.equal(sim.fuentesQueCambian, 6); assert.deepEqual(sim.porAgente, { rene: 1, conchi: 2, alfred: 1, amalia: 2 });
   assert.equal(sim.sinZona.total, 2); assert.deepEqual(sim.sinZona.listado.map(x => [x.fuenteId, x.motivo]).sort(), [['fte_web_nada', 'sin_ubicacion'], ['fte_web_pt', 'zona_sin_agente']]);
   assert.equal(await code(repartirFuentes(s, { modo: 'aplicar', codigoConfirmacion: 'falso' }, alfred)), 'board_confirmacion_invalida'); assert.equal(s.writes.length, antes);
   const ok = await repartirFuentes(s, { modo: 'aplicar', codigoConfirmacion: sim.codigoConfirmacion }, alfred, { now }); assert.equal(ok.reasignadas, 6); assert.equal(ok.sinZona, 2);
   const r = id => s.docs.get('registro_fuentes/' + id).data;
-  assert.equal(r('fte_web_sa').responsable, 'alfie'); assert.equal(r('fte_web_bu').responsable, 'conchi'); assert.equal(r('fte_web_ma').responsable, 'conchi'); assert.equal(r('fte_web_se').responsable, 'alfred'); assert.equal(r('fte_web_ga').responsable, 'amalia'); assert.equal(r('fte_web_gal').responsable, 'amalia');
+  assert.equal(r('fte_web_sa').responsable, 'rene'); assert.equal(r('fte_web_bu').responsable, 'conchi'); assert.equal(r('fte_web_ma').responsable, 'conchi'); assert.equal(r('fte_web_se').responsable, 'alfred'); assert.equal(r('fte_web_ga').responsable, 'amalia'); assert.equal(r('fte_web_gal').responsable, 'amalia');
   assert.equal(r('fte_web_nada').responsable, undefined); assert.equal(r('fte_web_ya').responsable, 'hark'); assert.equal(r('fte_web_fus').responsable, undefined); assert.equal(r('fte_web_alias').responsable, 'alfred-altas');
-  assert.equal(r('fte_web_sa').modificada_por, 'alfred'); assert.equal(r('fte_web_sa').historial.at(-1).cambios[0].despues, 'alfie');
+  assert.equal(r('fte_web_sa').modificada_por, 'alfred'); assert.equal(r('fte_web_sa').historial.at(-1).cambios[0].despues, 'rene');
   assert.equal((await repartirFuentes(s, {}, alfred)).fuentesQueCambian, 0);
 });
 
 test('reasignar_fuentes_zona respeta la jerarquía: reasignar Castilla y León a Conchi no toca Salamanca (de Alfie)', async () => {
-  const s = new Store([fte('fte_web_sa', { provincia: 'Salamanca', region: 'Castilla y León', responsable: 'alfie' }), fte('fte_web_bu', { provincia: 'Burgos', region: 'Castilla y León', responsable: 'hark' }), fte('fte_web_so', { provincia: 'Soria', responsable: 'conchi' })]);
+  const s = new Store([fte('fte_web_sa', { provincia: 'Salamanca', region: 'Castilla y León', responsable: 'rene' }), fte('fte_web_bu', { provincia: 'Burgos', region: 'Castilla y León', responsable: 'hark' }), fte('fte_web_so', { provincia: 'Soria', responsable: 'conchi' })]);
   await asignarZonasLote(s, { reparto: REPARTO, motivo: 'Reparto inicial', modo: 'aplicar' }, alfred, { now });
   const sim = await reasignarFuentesZona(s, { zona: 'Castilla y León', agente: 'conchi' }, alfred); assert.equal(sim.fuentesQueCambian, 1); assert.equal(sim.muestra[0].fuenteId, 'fte_web_bu');
   const ok = await reasignarFuentesZona(s, { zona: 'Castilla y León', agente: 'conchi', modo: 'aplicar', codigoConfirmacion: sim.codigoConfirmacion }, alfred, { now }); assert.equal(ok.reasignadas, 1);
-  assert.equal(s.docs.get('registro_fuentes/fte_web_sa').data.responsable, 'alfie'); assert.equal(s.docs.get('registro_fuentes/fte_web_bu').data.responsable, 'conchi');
+  assert.equal(s.docs.get('registro_fuentes/fte_web_sa').data.responsable, 'rene'); assert.equal(s.docs.get('registro_fuentes/fte_web_bu').data.responsable, 'conchi');
 });
 
 test('migración de identidades (ensayo puro): informe por colección y alias; no borra; eventos solo añaden agenteCanonico; huella determinista', () => {
@@ -168,7 +168,7 @@ test('migración de identidades (ensayo puro): informe por colección y alias; n
   const col = {
     tablon_agentes: [R('m1', { hilo: 'm1', autor: 'alfred-altas', agente: 'alfred-altas', destinatarios: ['amalia-asistente', 'amalia'], estado: 'resuelto', resuelto_por: 'alfred-altas' }), R('m2', { hilo: 'm1', autor: 'conchi', agente: 'conchi', destinatarios: ['alfred'] })],
     tareas_agentes: [R('t1', { agente: 'amalia-asistente', creada_por: 'amalia-asistente', historial: [{ por: 'amalia-asistente' }, { por: 'alfred' }] })],
-    zonas_agentes: [R('madrid', { agente: 'alfie', asignada_por: 'alfred-altas', historial: [] })],
+    zonas_agentes: [R('madrid', { agente: 'rene', asignada_por: 'alfred-altas', historial: [] })],
     tablon_lecturas: [R('alfred-altas', { hilos: { m1: '2026-11-21T10:00:00Z' } }), R('conchi', { hilos: {} })],
     registro_fuentes: [R('f1', { responsable: 'alfred-altas', creada_por: 'alfred-altas', modificada_por: 'amalia-asistente', historial: [{ por: 'alfred-altas' }] }), R('f2', { responsable: 'alfred' }), R('f3', {})],
     eventos: [R('e1', { createdBy: 'alfred-altas' }), R('e2', { createdBy: 'alfred' }), R('e3', { createdBy: 'conchi-owner' }), R('e4', { createdBy: 'ia-externa' }), R('e5', {}), R('e6', { createdBy: 'conchi', agenteCanonico: 'conchi' })]
@@ -192,7 +192,7 @@ test('fuentes que solo traen el municipio se ubican por otras fuentes del mismo 
   const s = new Store([fte('fte_web_a', { municipio: 'Béjar', provincia: 'Salamanca' }), fte('fte_web_b', { municipio: 'Béjar' }), fte('fte_web_c', { municipio: 'Almagro' }), fte('fte_web_d', { municipio: 'Ámbito regional Castilla-La Mancha' }), fte('fte_web_e', { municipio: 'Ámbito editorial por contrastar' })]);
   await asignarZonasLote(s, { reparto: REPARTO, motivo: 'Reparto inicial', modo: 'aplicar' }, alfred, { now });
   const sim = await repartirFuentes(s, {}, alfred);
-  assert.equal(sim.ubicadasPorSuMunicipio, 1); assert.deepEqual(sim.porAgente, { alfie: 3 }); // Béjar (Salamanca) y la comunidad Castilla-La Mancha, ambas de Alfie, más fte_web_a
+  assert.equal(sim.ubicadasPorSuMunicipio, 1); assert.deepEqual(sim.porAgente, { rene: 3 }); // Béjar (Salamanca) y la comunidad Castilla-La Mancha, ambas de Alfie, más fte_web_a
   assert.deepEqual(sim.sinZona.listado.map(x => [x.fuenteId, x.motivo]).sort(), [['fte_web_c', 'zona_sin_agente'], ['fte_web_e', 'sin_ubicacion']]);
 });
 

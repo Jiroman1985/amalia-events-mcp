@@ -165,6 +165,12 @@ Pruebas reproducibles: `FIRESTORE_EMULATOR_HOST=127.0.0.1:8686 AMALIA_TEST_PUBLI
 - Municipio con alias (`Lumbier/Irunberri`, `Donostia`/`San Sebastián`…, tabla ampliable en `clave-sesion.mjs`); una clave por **día** en rangos `fechaLocal`–`fechaFinLocal` (hasta 31 días); el tipo de recinto (teatro, auditorio, museo, iglesia, plaza…) ya no se quita; fecha/hora de eventos antiguos desde `dateTime` en hora de Madrid.
 - `rellenar_claves.mjs`: lo que sobra se libera, no se borra.
 
+## 2.25.19 — los agentes de baja no pueden ser destinatarios (SIGUE EN SOMBRA)
+
+- `publicar_mensaje` y `responder_mensaje` rechazan como destinatario a cualquier agente de `AGENTES_BAJA` (alias y mayúsculas incluidos) con `board_destinatario_baja` (`agentes`, `ayuda`). Las respuestas y decisiones por defecto en hilos antiguos omiten a los agentes de baja en vez de fallar.
+- `publicar_tarea` rechaza asignar o publicar una tarea a un agente de baja con `tarea_agente_baja`.
+- Se retiró `~/tokens-ingesta/alfie.token`.
+
 ## 2.25.18 — baja del agente alfie (SIGUE EN SOMBRA)
 
 - `alfie` sale de `AGENTES` (identidad.mjs) y de `AGENTES_CONOCIDOS` (tareas.mjs): ya no aparece en `resumen_tareas` ni genera la alerta `sin_tareas_publicadas`, y no cuenta como lector de los avisos a «todos». `AGENTES_BAJA = ['alfie']` conserva su identidad: `agenteCanonico('alfie')` sigue siendo `alfie`, y createdBy/updatedBy/autor «alfie» se siguen leyendo y contando en listados de días pasados; sus tareas siguen guardadas y listables con `listar_tareas`.

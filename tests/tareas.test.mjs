@@ -14,7 +14,7 @@ class Store {
   }
 }
 const P = (id, actions) => ({ id, actions, businesses: ['*'] });
-const alfred = P('alfred', ['read', 'board', 'board_admin']), alfredAltas = P('alfred-altas', ['read', 'board']), alfie = P('alfie', ['read', 'board']), conchi = P('conchi', ['read', 'board']), hark = P('hark', ['read', 'board']), panel = P('panel', ['board_read']), sin = P('ingesta', ['read', 'admit']);
+const alfred = P('alfred', ['read', 'board', 'board_admin']), alfredAltas = P('alfred-altas', ['read', 'board']), rene = P('rene', ['read', 'board']), conchi = P('conchi', ['read', 'board']), hark = P('hark', ['read', 'board']), panel = P('panel', ['board_read']), sin = P('ingesta', ['read', 'admit']);
 let reloj = 0; const now = () => new Date(Date.UTC(2026, 10, 21, 10, 0, reloj++)).toISOString();
 const code = p => p.then(() => null, e => e.code);
 
@@ -23,9 +23,9 @@ test('permisos: sin board no se publica ni lee; board_read solo lee; el agente s
   assert.equal(await code(publicarTarea(s, { titulo: 'Revisar fuentes' }, sin)), 'forbidden');
   assert.equal(await code(publicarTarea(s, { titulo: 'Revisar fuentes' }, panel)), 'forbidden');
   assert.equal(await code(listarTareas(s, {}, sin)), 'forbidden');
-  const t = await publicarTarea(s, { titulo: 'Revisar fuentes vencidas de Cáceres', estado: 'en_curso', agente: 'alfie' }, alfie, { now });
-  assert.equal(t.agente, 'alfie'); assert.equal(t.estado, 'en_curso'); assert.equal(t.asignadaPor, null);
-  assert.equal(await code(publicarTarea(s, { titulo: 'Tarea para Conchi', agente: 'conchi' }, alfie)), 'forbidden'); // solo Alfred reparte
+  const t = await publicarTarea(s, { titulo: 'Revisar fuentes vencidas de Cáceres', estado: 'en_curso', agente: 'rene' }, rene, { now });
+  assert.equal(t.agente, 'rene'); assert.equal(t.estado, 'en_curso'); assert.equal(t.asignadaPor, null);
+  assert.equal(await code(publicarTarea(s, { titulo: 'Tarea para Conchi', agente: 'conchi' }, rene)), 'forbidden'); // solo Alfred reparte
   const a = await publicarTarea(s, { titulo: 'Revisar Soria', agente: 'conchi' }, alfred, { now }); assert.equal(a.agente, 'conchi'); assert.equal(a.asignadaPor, 'alfred'); assert.equal(a.estado, 'siguiente');
   assert.equal((await listarTareas(s, {}, panel)).total, 2);
 });
@@ -55,9 +55,9 @@ test('ciclo de vida: siguiente → en curso (con progreso) → hecha; la termina
 });
 
 test('bloqueo con motivo obligatorio; solo el dueño (o sus otros principales) o Alfred modifican', async () => {
-  const s = new Store(); const t = await publicarTarea(s, { titulo: 'Esperar licencia del ayuntamiento', estado: 'en_curso' }, alfie, { now });
-  assert.equal(await code(actualizarTarea(s, { tareaId: t.tareaId, estado: 'bloqueada' }, alfie)), 'tarea_motivo_bloqueo_requerido');
-  const b = await actualizarTarea(s, { tareaId: t.tareaId, estado: 'bloqueada', motivoBloqueo: 'Espera respuesta de Alfred' }, alfie, { now }); assert.equal(b.motivoBloqueo, 'Espera respuesta de Alfred');
+  const s = new Store(); const t = await publicarTarea(s, { titulo: 'Esperar licencia del ayuntamiento', estado: 'en_curso' }, rene, { now });
+  assert.equal(await code(actualizarTarea(s, { tareaId: t.tareaId, estado: 'bloqueada' }, rene)), 'tarea_motivo_bloqueo_requerido');
+  const b = await actualizarTarea(s, { tareaId: t.tareaId, estado: 'bloqueada', motivoBloqueo: 'Espera respuesta de Alfred' }, rene, { now }); assert.equal(b.motivoBloqueo, 'Espera respuesta de Alfred');
   assert.equal(await code(actualizarTarea(s, { tareaId: t.tareaId, estado: 'en_curso' }, hark)), 'forbidden');
   const r = await actualizarTarea(s, { tareaId: t.tareaId, estado: 'en_curso' }, alfred, { now }); assert.equal(r.motivoBloqueo, null);
   const mia = await publicarTarea(s, { titulo: 'Altas de Alfred' }, alfredAltas, { now }); assert.equal(mia.agente, 'alfred');
@@ -110,12 +110,20 @@ test('estadoPanel: en pausa con tanda programada; bloqueado solo si depende del 
 test('alfie dado de baja: no sale en resumen_tareas ni con alerta, pero sus tareas siguen guardadas y listables', async () => {
   const s = new Store(), ahora = Date.UTC(2026, 10, 24, 12, 0, 0), t0 = () => '2026-11-20T11:00:00.000Z';
   // Tareas históricas de alfie (en curso, siguiente y hecha) ya guardadas antes de la baja
-  await publicarTarea(s, { titulo: 'Revisar Cáceres', estado: 'en_curso' }, alfie, { now: t0 }); await publicarTarea(s, { titulo: 'Tanda pendiente' }, alfie, { now: t0 });
-  const h = await publicarTarea(s, { titulo: 'Fuentes de Toledo', estado: 'en_curso' }, alfie, { now: t0 }); await actualizarTarea(s, { tareaId: h.tareaId, estado: 'hecha' }, alfie, { now: t0 });
-  assert.ok([...s.docs.values()].filter(r => r.data.agente === 'alfie').length >= 3);
+  for (const [id, estado] of [['tsk_h1', 'en_curso'], ['tsk_h2', 'siguiente'], ['tsk_h3', 'hecha']]) s.docs.set('tareas_agentes/' + id, { id, data: { id, agente: 'alfie', titulo: 'Tarea histórica ' + id, estado, prioridad: 'normal', creada_en: t0(), actualizada_en: t0(), terminada_en: estado === 'hecha' ? t0() : null }, updateTime: '1' });
+  assert.equal([...s.docs.values()].filter(r => r.data.agente === 'alfie').length, 3);
   const r = await resumenTareas(s, panel, { ahora });
   assert.equal(r.agentes.some(a => a.agente === 'alfie'), false); assert.equal(r.conAlerta.some(a => a.agente === 'alfie'), false);
   assert.deepEqual(r.agentes.map(a => a.agente).sort(), ['alfred', 'amalia', 'conchi', 'hark', 'lola', 'noodle', 'rene']);
   const l = await listarTareas(s, { agente: 'alfie' }, alfred); assert.ok(l.total >= 3, 'el historial de tareas de alfie sigue consultable');
   assert.equal(AGENTES.includes('alfie'), false); assert.equal(AGENTES_CONOCIDOS.includes('alfie'), false);
+});
+
+test('publicar_tarea rechaza a un agente de baja (asignarle una tarea o publicar como él) con un error claro', async () => {
+  const s = new Store();
+  const e = await publicarTarea(s, { titulo: 'Tarea para alguien de baja', agente: 'alfie' }, alfred, { now }).then(() => null, e => e);
+  assert.equal(e.code, 'tarea_agente_baja'); assert.equal(e.details.agente, 'alfie'); assert.match(e.details.ayuda, /de baja/);
+  assert.equal(await code(publicarTarea(s, { titulo: 'Tarea publicada como alfie' }, P('alfie', ['read', 'board']), { now })), 'tarea_agente_baja');
+  assert.equal([...s.docs.values()].filter(r => r.data.agente === 'alfie').length, 0, 'no se escribe nada');
+  assert.equal((await publicarTarea(s, { titulo: 'Tarea para Noodle', agente: 'noodle' }, alfred, { now })).agente, 'noodle');
 });

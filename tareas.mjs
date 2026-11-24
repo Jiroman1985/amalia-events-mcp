@@ -3,7 +3,7 @@
 import { randomBytes } from 'node:crypto';
 import { fail, authorize } from './event-domain.mjs';
 import { agenteDe, esAdminTablon } from './tablon.mjs';
-import { agenteCanonico, AGENTES_BAJA } from './identidad.mjs';
+import { agenteCanonico, AGENTES_BAJA, dadosDeBaja } from './identidad.mjs';
 
 export const COL = 'tareas_agentes';
 export const ESTADOS = ['en_curso', 'siguiente', 'bloqueada', 'hecha', 'cancelada'];
@@ -33,6 +33,7 @@ export async function publicarTarea(store, input, principal, { now = () => new D
   authorize(principal, null, 'board'); limita(principal);
   const yo = agenteDe(principal.id); let agente = yo;
   if (input.agente != null && String(input.agente).toLowerCase() !== yo) { if (!esAdminTablon(principal)) authorize(principal, null, 'board_admin'); agente = agenteCanonico(String(input.agente).toLowerCase().trim()); if (!AGENTE_RE.test(agente)) fail('tarea_agente_invalido'); }
+  const baja = dadosDeBaja([agente]); if (baja.length) fail('tarea_agente_baja', { agente: baja[0], ayuda: 'El agente «' + baja[0] + '» está de baja: no se le pueden asignar ni publicar tareas. Asígnala a otro agente activo (p. ej. noodle).' });
   const estado = input.estado || 'siguiente'; if (!['en_curso', 'siguiente'].includes(estado)) fail('tarea_estado_invalido', { validos: ['en_curso', 'siguiente'], ayuda: 'Una tarea nueva empieza «en_curso» (la estás haciendo) o «siguiente» (la harás después).' });
   const propias = (await todas(store)).map(r => r.data).filter(d => d.agente === agente && activa(d));
   if (estado === 'en_curso' && propias.filter(d => d.estado === 'en_curso').length >= MAX_EN_CURSO) fail('tarea_limite_en_curso', { maximo: MAX_EN_CURSO, ayuda: 'Termina o devuelve a «siguiente» alguna tarea en curso antes de empezar otra.' });

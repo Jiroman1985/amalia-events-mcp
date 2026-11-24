@@ -14,6 +14,8 @@ export const ALIAS = {
 };
 export const agenteCanonico = id => { const k = String(id ?? '').toLowerCase().trim(); return ALIAS[k] || k; };
 export const esAgente = id => AGENTES.includes(agenteCanonico(id));
+/** De una lista de agentes, los que están de baja (ya canónicos y sin repetir). */
+export const dadosDeBaja = lista => [...new Set((lista || []).map(agenteCanonico))].filter(x => AGENTES_BAJA.includes(x));
 /** Agente conocido en el historial: activo o dado de baja. */
 export const esAgenteHistorico = id => esAgente(id) || esAgenteBaja(id);
 /** Identidad de un principal autenticado: {agente (canónico), principal (original)}. */
