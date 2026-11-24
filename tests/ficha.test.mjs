@@ -7,7 +7,7 @@ import { DomainError } from '../event-domain.mjs';
 
 const owner = { id: 'owner', actions: ['*'], businesses: ['*'] };
 const hark = { id: 'hark', actions: ['admit', 'read'], businesses: ['*'] };
-const base = (o = {}) => ({ negocioId: 'b', titulo: 'Taller de ensayo', descripcion: 'Descripción de ensayo', city: 'Almagro', fechaLocal: '2027-01-10', sesionId: 's1', fuentes: [{ url: 'https://example.org/a' }], ...o });
+const base = (o = {}) => ({ negocioId: 'b', titulo: 'Taller de ensayo', descripcion: 'Descripción de ensayo', city: 'Almagro', provincia: 'Provincia de prueba', fechaLocal: '2027-01-10', sesionId: 's1', fuentes: [{ url: 'https://example.org/a' }], ...o });
 const code = f => { try { f(); } catch (e) { return e.code; } return null; };
 
 test('etiquetas: vocabulario cerrado, máximo 8 y sin repetidos', () => {
@@ -73,7 +73,7 @@ const media = { get() { throw Error('no asset'); } };
 
 test('editar_evento: añade los campos nuevos, marca geo_revision_pendiente y conserva geo*', async () => {
   const store = new MemoryStore(), ev = new HistoricalFixtureService(store, media);
-  const e = await ev.create({ negocioId: 'bizA', titulo: 'Concierto de ensayo', descripcion: 'Evento de ensayo.', city: 'Málaga', fechaLocal: '2099-05-10', horaLocal: null, sesionId: 'e1', fuentes: [{ url: 'https://example.org/e', checkedAt: '2026-10-28T07:00:00Z' }], prueba: true, verificationStatus: 'capturado' }, owner);
+  const e = await ev.create({ negocioId: 'bizA', titulo: 'Concierto de ensayo', descripcion: 'Evento de ensayo.', city: 'Málaga', provincia: 'Provincia de prueba', fechaLocal: '2099-05-10', horaLocal: null, sesionId: 'e1', fuentes: [{ url: 'https://example.org/e', checkedAt: '2026-10-28T07:00:00Z' }], prueba: true, verificationStatus: 'capturado' }, owner);
   // el geocodificador (otro proceso) escribe geo, geo_precision y geo_fuente
   const row = store.rows.get('eventos/' + e.eventId); row.data.geo = { latitude: 36.7, longitude: -4.4 }; row.data.geo_precision = 'ciudad'; row.data.geo_fuente = 'nominatim';
   const r = await ev.update({ eventId: e.eventId, negocioId: 'bizA', expectedVersion: 1, changes: { etiquetas: ['musica', 'accesible'], fuente_tipo: 'oficial', fuente_nombre: 'Ayto. de Málaga' }, reason: 'completar ficha' }, owner);

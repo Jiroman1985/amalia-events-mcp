@@ -27,7 +27,7 @@ async function fixture({autonomous=true}={}){
  const accounts=[{id:'ig1',channel:'instagram',username:'amaliaexperience',confirmed:true,businesses:['founder']},{id:'tt1',channel:'tiktok',username:'amalia',confirmed:true,businesses:['founder']}];
  const editorial=new Editorial({db,events,media,accounts,publicBase:'https://example.org',paused:false,autonomy:{businesses:autonomous?['founder']:[]}});
  const kalma=new KalmaExport({events,media,editorial,key:KEY,config:{businessId:'kalma-biz',profile:'lumia_x',instagram:'amaliaexperience'}});
- const event=await events.create({negocioId:'founder',titulo:'Concierto de prueba',descripcion:'Evento de la fuente para el ensayo.',city:'Málaga',fechaLocal:'2099-05-10',horaLocal:null,timeZone:'Europe/Madrid',sesionId:'s1',fuentes:[{url:'https://example.org/e',checkedAt:'2026-10-28T07:00:00Z'}],verificationStatus:'verificado',requestId:'ev'},owner);
+ const event=await events.create({negocioId:'founder',titulo:'Concierto de prueba',descripcion:'Evento de la fuente para el ensayo.',city:'Málaga',provincia:'Provincia de prueba',fechaLocal:'2099-05-10',horaLocal:null,timeZone:'Europe/Madrid',sesionId:'s1',fuentes:[{url:'https://example.org/e',checkedAt:'2026-10-28T07:00:00Z'}],verificationStatus:'verificado',requestId:'ev'},owner);
  const asset=async n=>(await media.persist({url:'https://example.org/'+n+'.png',sourceUrl:'https://example.org/e',negocioId:'founder',rights:{status:'permission',evidence:'Permiso documentado '+n,credit:'Autor '+n}},owner));
  const a1=await asset('uno'),a2=await asset('dos');
  return {directory,db,events,media,editorial,kalma,event,a1,a2,close(){db.close();rmSync(directory,{recursive:true,force:true});},

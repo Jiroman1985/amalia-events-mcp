@@ -14,7 +14,7 @@ const owner = { id: 'conchi-owner', actions: ['*'], businesses: ['*'] };
 const editorA = { id: 'editor-a', actions: ['read', 'create', 'edit'], businesses: ['bizA'] };
 
 const base = (o = {}) => ({
-  negocioId: 'bizA', titulo: 'Concierto de ensayo', descripcion: 'Evento de ensayo.', city: 'Málaga', fechaLocal: '2099-05-10', horaLocal: null,
+  negocioId: 'bizA', titulo: 'Concierto de ensayo', descripcion: 'Evento de ensayo.', city: 'Málaga', provincia: 'Provincia de prueba', fechaLocal: '2099-05-10', horaLocal: null,
   timeZone: 'Europe/Madrid', sesionId: 'ensayo-1', fuentes: [{ url: 'https://example.org/e', checkedAt: '2026-11-01T10:00:00.000Z' }], prueba: true, ...o,
 });
 

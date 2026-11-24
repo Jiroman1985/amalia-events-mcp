@@ -29,7 +29,7 @@ class MemoryStore {
     return { id, data, updateTime: String(this.seq) };
   }
 }
-const ev = (o = {}) => ({ negocioId: 'bizA', titulo: 'Concierto de ensayo', descripcion: 'Evento de ensayo.', city: 'Almagro', fechaLocal: '2099-05-10', horaLocal: null, timeZone: 'Europe/Madrid', fuentes: [{ url: EV, checkedAt: '2026-11-01T10:00:00.000Z' }], prueba: true, ...o });
+const ev = (o = {}) => ({ negocioId: 'bizA', titulo: 'Concierto de ensayo', descripcion: 'Evento de ensayo.', city: 'Almagro', provincia: 'Provincia de prueba', fechaLocal: '2099-05-10', horaLocal: null, timeZone: 'Europe/Madrid', fuentes: [{ url: EV, checkedAt: '2026-11-01T10:00:00.000Z' }], prueba: true, ...o });
 async function fx(input = ev()) {
   const store = new MemoryStore(), events = new EventService(store, { get() { throw Error('no asset'); } });
   const e = await events.create(input, owner);

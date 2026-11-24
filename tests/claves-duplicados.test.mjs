@@ -62,7 +62,7 @@ const alfred = { id: 'alfred', actions: ['*'], businesses: ['*'], agente: 'alfre
 const conchi = { id: 'conchi', actions: ['admit', 'read', 'complete', 'admit_test'], businesses: ['*'], agente: 'conchi' };
 const mk = (modo = 'bloquea') => { const store = new MemoryStore(); return { store, ev: new EventService(store, { get() { throw Error('sin imagen'); } }, { warm: false, claves: modo }) }; };
 let n = 0;
-const ficha = (o = {}) => ({ negocioId: 'b', titulo: 'Titulo ' + (++n), descripcion: 'Descripción del evento.', city: 'Zizur Mayor', timeZone: 'Europe/Madrid', fuentes: [{ url: 'https://example.org/a/' + n, checkedAt: '2026-11-20T10:00:00Z' }], verificationStatus: 'capturado', fechaLocal: '2099-11-28', horaLocal: '20:00', lugar: 'Casa de Cultura de Zizur Mayor', requestId: 'req-' + n, ...o });
+const ficha = (o = {}) => ({ negocioId: 'b', titulo: 'Titulo ' + (++n), descripcion: 'Descripción del evento.', city: 'Zizur Mayor', provincia: 'Provincia de prueba', timeZone: 'Europe/Madrid', fuentes: [{ url: 'https://example.org/a/' + n, checkedAt: '2026-11-20T10:00:00Z' }], verificationStatus: 'capturado', fechaLocal: '2099-11-28', horaLocal: '20:00', lugar: 'Casa de Cultura de Zizur Mayor', requestId: 'req-' + n, ...o });
 const alta = async (ev, input, p = alfred) => { const pr = await ev.prepareAdmission(input, p); return ev.admitCandidate({ accion: 'admit', proposalHash: pr.proposalHash, evento: input }, p); };
 const codigo = async fn => { try { await fn(); return null; } catch (e) { return e instanceof DomainError ? e.code : 'otro:' + e.message; } };
 

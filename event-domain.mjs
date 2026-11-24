@@ -230,6 +230,24 @@ function geography(input) {
   if (u.municipio && input.city && normalizeText(u.municipio)!==normalizeText(input.city)) fail('conflicting_location');
   return {city:u.municipio||input.city,lugar:u.lugar||input.lugar,provincia:u.provincia||null,pais:u.pais||null,direccion:u.direccion??null};
 }
+/**
+ * Alta nueva (preparar_admision / admitir_candidato): exige fechaLocal en formato ISO, municipio y provincia, y que city/town/ciudad/municipio,
+ * si vienen, coincidan entre sí. Cada fallo dice qué campo falta o no cuadra. Las ediciones de eventos existentes no pasan por aquí.
+ */
+export function assertAltaCompleta(input) {
+  const txt=v=>typeof v==='string'?v.trim():'',falta=(campo,ayuda)=>fail('missing_field',{campo,ayuda});
+  const u=input.ubicacion,uObj=u&&typeof u==='object'?u:null,uTxt=typeof u==='string'?u:'';
+  const t=input.temporalidad,s0=t&&typeof t==='object'&&Array.isArray(t.sesiones)?t.sesiones[0]:null;
+  const fecha=txt(s0?(s0.fechaLocal??s0.fecha_local):input.fechaLocal);
+  if (!fecha&&!txt(input.dateTime)) falta('fechaLocal','Falta fechaLocal (formato ISO AAAA-MM-DD, p. ej. 2026-12-05) o temporalidad con sesiones.');
+  if (fecha&&!/^\d{4}-\d{2}-\d{2}$/.test(fecha)) fail('invalid_local_date',{campo:'fechaLocal',valor:fecha.slice(0,40),ayuda:'fechaLocal debe ir en formato ISO AAAA-MM-DD (p. ej. 2026-12-05).'});
+  const ref=[['ubicacion.municipio',uObj?.municipio],['ubicacion',uTxt],['municipio',input.municipio],['city',input.city]].map(([c,v])=>[c,txt(v)]).find(([,v])=>v);
+  if (!ref) falta('municipio','Falta el municipio: indica city (o ubicacion.municipio) con el municipio del evento.');
+  for (const [campo,v] of [['city',input.city],['town',input.town],['ciudad',input.ciudad],['municipio',input.municipio],['ubicacion',uTxt],['ubicacion.municipio',uObj?.municipio]]) {
+    const x=txt(v); if (x&&normalizeText(x)!==normalizeText(ref[1])) fail('conflicting_location',{campo,valor:x.slice(0,120),municipio:ref[1].slice(0,120),ayuda:'«'+campo+'» debe coincidir con el municipio ('+ref[0]+' = '+ref[1].slice(0,120)+').'});
+  }
+  if (txt(uObj?uObj.provincia:input.provincia).length<2&&txt(input.provincia).length<2) falta('provincia','Falta la provincia: indica provincia (o ubicacion.provincia), p. ej. «Granada».');
+}
 export function canonicalInput(input,opts={}) {
   const geo=geography(input),temp=temporality(input);
   const merged=temp.overrides?{...input,...Object.fromEntries(Object.entries(temp.overrides).filter(([,v])=>v!==undefined))}:input;

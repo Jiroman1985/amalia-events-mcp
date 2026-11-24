@@ -36,7 +36,7 @@ class MemoryStore {
  async revisions(id){return this.audit.get(id)||[];}
  touch(c,id){const r=this.rows.get(c+'/'+id);r.updateTime=String(++this.seq);}   // otra escritura concurrente que no cambia la versión
 }
-const input=(o={})=>({negocioId:'bizA',titulo:'Concierto de ensayo',descripcion:'Evento de ensayo.',city:'Málaga',fechaLocal:'2099-05-10',horaLocal:null,timeZone:'Europe/Madrid',sesionId:'ensayo-1',fuentes:[{url:'https://example.org/e',checkedAt:'2026-10-28T07:00:00Z'}],prueba:true,verificationStatus:'capturado',...o});
+const input=(o={})=>({negocioId:'bizA',titulo:'Concierto de ensayo',descripcion:'Evento de ensayo.',city:'Málaga',provincia:'Provincia de prueba',fechaLocal:'2099-05-10',horaLocal:null,timeZone:'Europe/Madrid',sesionId:'ensayo-1',fuentes:[{url:'https://example.org/e',checkedAt:'2026-10-28T07:00:00Z'}],prueba:true,verificationStatus:'capturado',...o});
 async function fixture(){
  const directory=mkdtempSync(join(tmpdir(),'amalia-retire-')),db=new DatabaseSync(':memory:'),store=new MemoryStore();
  const media=new MediaStore({directory,db,publicBase:'https://example.org/amalia-events',downloader:async()=>Buffer.from(PNG,'base64')}),events=new EventService(store,media);
@@ -165,7 +165,7 @@ test('herramientas MCP: vista previa, confirmación, piezas en Kalma, recuperaci
  const registry=[{id:'conchi-owner',tokenHash:hash('token-de-ensayo-no-real'),actions:['*'],businesses:['*']},{id:'editor-a',tokenHash:hash('token-editor-ensayo'),actions:['read','create','edit'],businesses:['bizA']}];
  const app=createApp(ctx,registry);await new Promise(r=>app.listen(0,'127.0.0.1',r));const base='http://127.0.0.1:'+app.address().port,T='token-de-ensayo-no-real';
  try{
-  assert.equal(VERSION,'2.25.14');
+  assert.equal(VERSION,'2.25.15');
   const e=await f.events.create(input(),owner);
   // búsqueda pública: un evento verificado y visible aparece; retirado, no
   const doc=f.store.rows.get('eventos/'+e.eventId);doc.data.verificationStatus='verificado';doc.data.prueba=false;doc.data.fuentes=[{url:'https://example.org/e',checkedAt:'2026-10-28T07:00:00Z'}];

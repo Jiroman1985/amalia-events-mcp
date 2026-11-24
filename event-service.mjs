@@ -5,7 +5,7 @@ import {ProgramAdmission} from './program-admission.mjs';
 import { claveNombre, identidadesCalculadas, escanearDuplicados, informativaPorFuente, motivoSesion, horarioImplicitoDistinto, municipioDistintoAviso, reglaDuplicado, clasificarCoincidencias } from './dedup_amalia.mjs';
 import { randomUUID } from 'node:crypto';
 import { agenteCanonico } from './identidad.mjs';
-import { normSesiones,conPlazo,DomainError,assertFuentePrimaria,mergeSources,tituloSoloForma,canonicalInputExtras,canonicalInput,eventIdentity,fingerprint,record,authorize,authorizeCapture,id,fail,hash,originKey,normalizeText } from './event-domain.mjs';
+import { assertAltaCompleta,normSesiones,conPlazo,DomainError,assertFuentePrimaria,mergeSources,tituloSoloForma,canonicalInputExtras,canonicalInput,eventIdentity,fingerprint,record,authorize,authorizeCapture,id,fail,hash,originKey,normalizeText } from './event-domain.mjs';
 
 // Campos opcionales de ficha en candidatos privados: se validan con las mismas reglas que la admisión.
 const extrasCandidato=input=>{const {etiquetas,direccion,fuente_nombre,fuente_tipo,fuenteId}=canonicalInputExtras(input);return {...(fuenteId?{fuenteId}:{}),...(etiquetas?{etiquetas}:{}),...(direccion?{direccion}:{}),...(fuente_nombre?{fuente_nombre}:{}),...(fuente_tipo?{fuente_tipo}:{})};};
@@ -100,6 +100,7 @@ export class EventService {
   if(input.verificationStatus && input.verificationStatus!=='capturado')fail('admission_requires_capturado');
   if(input.image&&!input.assetId)fail('image_requires_saved_asset');
   if(input.assetId){const asset=this.media.get(input.assetId,input.negocioId,principal);input={...input,image:asset.url,sourceImageUrl:asset.sourceUrl};}
+  assertAltaCompleta(input);
   const canon=canonicalInput({...input,verificationStatus:'capturado'});
   assertFuentePrimaria(canon.fuentes);
   if(canon.prueba===true){
@@ -526,7 +527,9 @@ export class EventService {
  }
  async programContext(input,principal,requireOpen=false) {
   authorize(principal,input.negocioId,'read');const business=await this.business(input.negocioId);
-  const evaluated=await this.programs.evaluate(input,business),universe=await this.catalogUniverse({requireOpen});
+  const evaluated=await this.programs.evaluate(input,business);
+  if(!String(evaluated.event.provincia||'').trim())fail('missing_field',{campo:'provincia',ayuda:'Falta la provincia: indica provincia (o ubicacion.provincia) en el evento del programa.'});
+  const universe=await this.catalogUniverse({requireOpen});
   const reconciliation=await this.programs.reconcile(evaluated,universe);
   const eventId=eventIdentity(evaluated.event),existing=universe.docs.find(r=>r.id===eventId);
   const originalFingerprint=fingerprint(input),creationFingerprint=fingerprint({original:input,evidence:evaluated.unit.factsHash});

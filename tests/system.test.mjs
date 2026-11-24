@@ -10,7 +10,7 @@ import { MediaStore,publicAddress } from '../media-store.mjs';
 import { Editorial } from '../editorial.mjs';
 
 const owner={id:'conchi',actions:['*'],businesses:['*']},scoped={id:'business-a',actions:['read','create','edit'],businesses:['bizA']};
-const input=(overrides={})=>({negocioId:'bizA',titulo:'Concierto de prueba',descripcion:'Evento de la fuente para el ensayo.',city:'Málaga',fechaLocal:'2027-05-10',horaLocal:null,timeZone:'Europe/Madrid',sesionId:'fuente-sesion-A',fuentes:[{url:'https://example.org/event',checkedAt:'2026-10-28T07:00:00Z'}],verificationStatus:'verificado',...overrides});
+const input=(overrides={})=>({negocioId:'bizA',titulo:'Concierto de prueba',descripcion:'Evento de la fuente para el ensayo.',city:'Málaga',provincia:'Provincia de prueba',fechaLocal:'2027-05-10',horaLocal:null,timeZone:'Europe/Madrid',sesionId:'fuente-sesion-A',fuentes:[{url:'https://example.org/event',checkedAt:'2026-10-28T07:00:00Z'}],verificationStatus:'verificado',...overrides});
 class MemoryStore {
  constructor(){this.rows=new Map([['negocios/bizA',{data:{nombre:'A'},updateTime:'1'}],['negocios/bizB',{data:{nombre:'B'},updateTime:'2'}]]);this.audit=new Map();this.seq=2;}
  async get(c,id){const r=this.rows.get(c+'/'+id);return r?{id,...structuredClone(r)}:null;}

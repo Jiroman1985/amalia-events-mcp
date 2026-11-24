@@ -23,7 +23,7 @@ class MemoryStore {
   }
   async revisions() { return []; }
 }
-const base = (o = {}) => ({ negocioId: 'b', titulo: 'Concierto de Navidad en Casatejada', descripcion: 'Ciclo de conciertos.', city: 'Casatejada', timeZone: 'Europe/Madrid', fuentes: [{ url: 'https://example.org/casatejada', checkedAt: '2026-11-20T10:00:00Z' }], prueba: true, verificationStatus: 'capturado', requestId: 'cand_b78231d9', ...o });
+const base = (o = {}) => ({ negocioId: 'b', titulo: 'Concierto de Navidad en Casatejada', descripcion: 'Ciclo de conciertos.', city: 'Casatejada', provincia: 'Provincia de prueba', timeZone: 'Europe/Madrid', fuentes: [{ url: 'https://example.org/casatejada', checkedAt: '2026-11-20T10:00:00Z' }], prueba: true, verificationStatus: 'capturado', requestId: 'cand_b78231d9', ...o });
 const sesiones = n => Array.from({ length: n }, (_, i) => ({ fechaLocal: `2099-12-${String(i + 1).padStart(2, '0')}`, horaLocal: '20:00' }));
 const svc = () => new EventService(new MemoryStore(), { get: () => { throw Error('sin imagen'); } }, { warm: false });
 

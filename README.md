@@ -165,6 +165,12 @@ Pruebas reproducibles: `FIRESTORE_EMULATOR_HOST=127.0.0.1:8686 AMALIA_TEST_PUBLI
 - Municipio con alias (`Lumbier/Irunberri`, `Donostia`/`San Sebastián`…, tabla ampliable en `clave-sesion.mjs`); una clave por **día** en rangos `fechaLocal`–`fechaFinLocal` (hasta 31 días); el tipo de recinto (teatro, auditorio, museo, iglesia, plaza…) ya no se quita; fecha/hora de eventos antiguos desde `dateTime` en hora de Madrid.
 - `rellenar_claves.mjs`: lo que sobra se libera, no se borra.
 
+## 2.25.15 — el alta exige fechaLocal ISO, municipio y provincia (SIGUE EN SOMBRA)
+
+- `preparar_admision` y `admitir_candidato` (también simulación, lote de sesiones y eventos de programas) rechazan el alta si falta alguno: `missing_field` con `campo` = `fechaLocal` | `municipio` | `provincia` y una ayuda. Un `fechaLocal` que no sea AAAA-MM-DD da `invalid_local_date` (campo y formato).
+- `city`, `town`, `ciudad`, `municipio` y `ubicacion` (texto u objeto), si vienen, deben coincidir entre sí (sin importar mayúsculas ni tildes): si no, `conflicting_location` con el campo que discrepa.
+- Municipio = `city` o `ubicacion.municipio`; provincia = `provincia` o `ubicacion.provincia`. Las ediciones de eventos existentes no cambian.
+
 ## 2.25.14 — consulta de candidatos solo por fechaLocal (SIGUE EN SOMBRA)
 
 - Backfill aplicado: `backfill_normalizar.mjs` en dry-run da 0 cambios (5.006 eventos; 4.533 con `fechaLocal`). Los 473 restantes no tienen ninguna fecha utilizable (sin fecha, «Hasta el…», UTC ambiguo…), así que tampoco podían coincidir por fecha.
