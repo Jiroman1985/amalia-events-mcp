@@ -1,6 +1,6 @@
 // identidad.mjs — identidad única por agente. Cada token (principal) se resuelve a UN agente canónico; el principal original se guarda aparte para auditoría.
 // El mapa vive aquí (y en el dashboard): alias → canónico. Los principales no listados son su propio agente (p. ej. claude-ingesta).
-export const AGENTES = ['alfred', 'alfie', 'conchi', 'amalia', 'hark', 'lola', 'susan', 'rene'];
+export const AGENTES = ['alfred', 'alfie', 'conchi', 'amalia', 'hark', 'lola', 'susan', 'rene', 'noodle'];
 export const ALIAS = {
   'alfred-altas': 'alfred', 'alfred-ediciones': 'alfred',
   'amalia-asistente': 'amalia',
