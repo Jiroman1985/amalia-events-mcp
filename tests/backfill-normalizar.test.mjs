@@ -11,6 +11,7 @@ const base = [
   fila('e', { nombre: 'Sin fecha', dateTime: '', ciudad: 'Viena' }),
   fila('f', { titulo: 'Ya canónico', fechaLocal: '2099-05-05', city: 'Almagro', provincia: 'Ciudad Real', version: 3 }),
   fila('g', { nombre: 'Distinta', fechaLocal: '2099-06-06', fecha_inicio: '2099-06-07', city: 'Almagro', provincia: 'Ciudad Real' }),
+  fila('i', { titulo: 'Respaldo', fechaLocal: '2099-08-08', city: 'Almagro', provincia: 'Ciudad Real' }),
   fila('h', { nombre: 'Provincia en ubicacion', fecha_inicio: '2099-07-01', ubicacion: { municipio: 'Pueblo', provincia: 'Toledo' } }),
 ];
 
@@ -18,6 +19,11 @@ test('fechaDeAntiguo: fecha_inicio, dateTime ISO con desfase, texto en español;
   assert.deepEqual(fechaDeAntiguo({ fecha_inicio: '2099-03-05' }), { fecha: '2099-03-05', origen: 'fecha_inicio' });
   assert.equal(fechaDeAntiguo({ dateTime: '2099-04-01T20:00:00+02:00' }).fecha, '2099-04-01');
   assert.equal(fechaDeAntiguo({ dateTime: '21 de marzo de 2099, 21:00h' }).fecha, '2099-03-21');
+  assert.equal(fechaDeAntiguo({ dateTime: '15-17 de marzo de 2026' }).fecha, '2026-03-15');
+  assert.equal(fechaDeAntiguo({ dateTime: '18 y 19 de marzo de 2026' }).fecha, '2026-03-18');
+  assert.equal(fechaDeAntiguo({ dateTime: 'Durante el fin de semana del 6 al 8 de diciembre de 2025' }).fecha, '2025-12-06');
+  assert.equal(fechaDeAntiguo({ dateTime: '21 de marzo de 2026, 09:00h a 14:00h' }).fecha, '2026-03-21');
+  for (const x of ['Hasta el 16 de marzo de 2026', 'Inscripciones abiertas a partir del 22 de enero de 2026']) assert.equal(fechaDeAntiguo({ dateTime: x }).motivo, 'dateTime_texto_sin_inicio');
   assert.equal(fechaDeAntiguo({ dateTime: '2099-04-01T22:30:00Z' }).motivo, 'dateTime_utc_ambiguo');
   assert.equal(fechaDeAntiguo({ dateTime: '31 de febrero de 2099' }).motivo, 'dateTime_no_interpretable');
   assert.equal(fechaDeAntiguo({ fecha_inicio: '2099-13-45' }).motivo, 'sin_fecha');
@@ -46,6 +52,8 @@ test('provincia: si un municipio tiene dos provincias distintas en el catálogo 
   const rows = [fila('x', { city: 'Villanueva', provincia: 'Badajoz' }), fila('y', { city: 'Villanueva', provincia: 'Córdoba' }), fila('z', { nombre: 'Antiguo', fecha_inicio: '2099-01-01', ciudad: 'Villanueva' })];
   const p = planNormalizacion(rows), z = p.cambios.find(c => c.id === 'z');
   assert.equal(z.despues.provincia, undefined); assert.ok(p.omitidos.provincia_desconocida.ejemplos.includes('z'));
+  const solo = planNormalizacion([fila('u', { city: 'Rarolandia', provincia: 'Soria' }), fila('v', { nombre: 'Antiguo', fecha_inicio: '2099-01-01', ciudad: 'Rarolandia' })]);
+  assert.equal(solo.cambios.find(c => c.id === 'v').despues.provincia, undefined); assert.ok(solo.omitidos.provincia_poco_respaldada.ejemplos.includes('v'));
 });
 
 test('aplicarPlan: lotes con versión+1, auditoría y guardia; un lote fallido no frena a los demás', async () => {

@@ -20,7 +20,7 @@ test('misma sesión exacta: duplicado (se rechaza)', () => {
 });
 
 test('mismo evento, mismo día y sitio, OTRA hora: otra sesión, se admite (caso Moi Animal 21:00 vs 18:30)', () => {
-  const r = escanearDuplicados(cand({ horaLocal: '21:00' }), [prev()]);
+  const r = escanearDuplicados(cand({ horaLocal: '21:00', fuentes: [{ url: 'https://teatro.example/moi-21h' }] }), [prev()]);
   assert.deepEqual(r.coincidencias, []);
 });
 
@@ -35,9 +35,10 @@ test('nombre con tildes, mayúsculas o signos distintos: duplicado', () => {
 });
 
 test('otra fecha, otro municipio u otro recinto: otro evento, se admite', () => {
-  assert.deepEqual(escanearDuplicados(cand({ fechaLocal: '2026-12-06' }), [prev()]).coincidencias, []);
-  assert.deepEqual(escanearDuplicados(cand({ city: 'Vigo' }), [prev()]).coincidencias, []);
-  assert.deepEqual(escanearDuplicados(cand({ lugar: 'Auditorio Municipal' }), [prev()]).coincidencias, []);
+  const otraUrl = { fuentes: [{ url: 'https://otra.example/moi' }] };
+  assert.deepEqual(escanearDuplicados(cand({ fechaLocal: '2026-12-06', ...otraUrl }), [prev()]).coincidencias, []);
+  assert.deepEqual(escanearDuplicados(cand({ city: 'Vigo', ...otraUrl }), [prev()]).coincidencias, []);
+  assert.deepEqual(escanearDuplicados(cand({ lugar: 'Auditorio Municipal', ...otraUrl }), [prev()]).coincidencias, []);
 });
 
 test('recinto ausente o igual al municipio no distingue lugares', () => {
@@ -140,4 +141,23 @@ test('Noja: no bloquea sesiones distintas legítimas (otra hora, otro día, otro
 test('Noja: la hora definida se compara como hora local (zona Europe/Madrid): 16:30 local = 15:30Z no es una hora distinta', () => {
   assert.deepEqual(escanearDuplicados({ ...nojaNuevo, horaLocal: '16:30' }, [{ ...nojaPrevio, data: { ...nojaPrevio.data, horaLocal: undefined, hora: undefined, dateTime: '2026-12-04T16:30:00+01:00' } }]).coincidencias.map(c => c.eventId), ['ev_0914c430539326170287cb88b91aa862']);
   assert.deepEqual(escanearDuplicados({ ...nojaNuevo, horaLocal: '15:30' }, [nojaPrevio]).coincidencias, []);
+});
+
+test('misma URL de origen y mismo título normalizado: bloquea aunque la fecha, la hora o el lugar sean otros', () => {
+  for (const o of [{ fechaLocal: '2026-12-06' }, { fechaLocal: '2027-03-01' }, { horaLocal: '21:00' }, { city: 'Vigo' }, { titulo: '  MOI, ánimal ' }]) {
+    const r = escanearDuplicados(cand(o), [prev()]);
+    assert.deepEqual(ids(r), ['ev_moi'], JSON.stringify(o)); assert.ok(r.coincidencias[0].motivos.includes('url_titulo'));
+  }
+});
+
+test('solo la misma URL (título distinto): sigue siendo un aviso, no bloquea', () => {
+  const r = escanearDuplicados(cand({ titulo: 'Otra obra distinta', fechaLocal: '2026-12-20', horaLocal: '20:00' }), [prev()]);
+  assert.deepEqual(r.coincidencias, []); assert.ok(r.informativas.some(c => c.eventId === 'ev_moi' && c.motivos.includes('url_fuente_otra_sesion')));
+});
+
+test('url+título no bloquea sesiones declaradas: sesionId explícito distinto en ambos, o evento por sesiones', () => {
+  const previo = prev({ sesionId: 'ses-1', sesionExplicita: true });
+  assert.deepEqual(escanearDuplicados(cand({ fechaLocal: '2026-12-06', sesionId: 'ses-2', sesionExplicita: true }), [previo]).coincidencias.filter(c => c.motivos.includes('url_titulo')), []);
+  assert.deepEqual(escanearDuplicados(cand({ fechaLocal: '2026-12-06', temporalidadTipo: 'sesiones' }), [prev()]).coincidencias, []);
+  assert.deepEqual(ids(escanearDuplicados(cand({ fechaLocal: '2026-12-06', sesionId: 'ses-2', sesionExplicita: true }), [prev()])), ['ev_moi'], 'si el existente no declaró sesión explícita, bloquea');
 });

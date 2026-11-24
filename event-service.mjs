@@ -210,7 +210,7 @@ export class EventService {
  // El agente acredita que la misma página de fuente publica otra sesión distinta (otro día, otro sesionId explícito).
  // Solo rebaja «url_fuente_otra_sesion»/«source_id_otra_sesion» de los eventos nombrados; cualquier otro motivo sigue bloqueando.
  confirmarOtraSesion(e,scan,universe,c) {
-  const SOLO=new Set(['url_fuente_otra_sesion','source_id_otra_sesion']),host=u=>{try{return new URL(u).hostname.toLowerCase().replace(/^www\./,'');}catch{return null;}};
+  const SOLO=new Set(['url_fuente_otra_sesion','source_id_otra_sesion','url_titulo']),host=u=>{try{return new URL(u).hostname.toLowerCase().replace(/^www\./,'');}catch{return null;}};
   const ids=[...new Set(c.eventIds||[])];
   if(!ids.length)fail('confirm_not_applicable',{ayuda:'confirmarOtraSesion.eventIds no puede estar vacío.'});
   if(e.sesionExplicita!==true)fail('confirm_requires_explicit_session',{ayuda:'Pasa un sesionId estable y propio de esta sesión (por ejemplo la fecha o el id de la ficha).'});

@@ -143,9 +143,13 @@ test('preparar_admision: reingreso con la fecha mal leída (fuera de ±1 día) s
   const orig = await events.create(nuevo({ titulo: 'Fiesta de la vendimia', fechaLocal: '2099-03-01', fuentes: [{ url: 'https://agenda.es/vendimia', checkedAt: '2026-11-01T10:00:00.000Z' }] }), owner);
   store.leidos = 0;
   const p = await events.prepareAdmission(nuevo({ titulo: 'Fiesta de la vendimia', fechaLocal: '2099-09-09', fuentes: [{ url: 'https://agenda.es/vendimia', checkedAt: '2026-11-01T10:00:00.000Z' }] }), owner);
+  const leidosPrimera = store.leidos;
   const hit = p.coincidencias.concat(p.informativas).find(c => c.eventId === orig.eventId);
-  assert.ok(hit, 'la misma URL fuera de la ventana se recupera'); assert.ok(hit.motivos.includes('url_fuente_otra_sesion'));
-  assert.ok(store.leidos < 100, 'lectura indexada, sin escaneo: ' + store.leidos);
+  assert.ok(hit, 'la misma URL fuera de la ventana se recupera'); assert.ok(hit.motivos.includes('url_titulo'));
+  assert.equal(p.admisible, false, 'misma URL y mismo título: bloquea');
+  const soloUrl = await events.prepareAdmission(nuevo({ titulo: 'Concierto de clausura', fechaLocal: '2099-09-09', fuentes: [{ url: 'https://agenda.es/vendimia', checkedAt: '2026-11-01T10:00:00.000Z' }] }), owner);
+  assert.equal(soloUrl.admisible, true, 'solo la URL: aviso'); assert.ok(soloUrl.informativas.some(c => c.eventId === orig.eventId && c.motivos.includes('url_fuente_otra_sesion')));
+  assert.ok(leidosPrimera < 100, 'lectura indexada, sin escaneo: ' + leidosPrimera);
   const otra = await events.prepareAdmission(nuevo({ titulo: 'Otra cosa', fechaLocal: '2099-09-09', fuentes: [{ url: 'https://agenda.es/otra', checkedAt: '2026-11-01T10:00:00.000Z' }] }), owner);
   assert.equal(otra.informativas.concat(otra.coincidencias).some(c => c.eventId === orig.eventId), false);
 });

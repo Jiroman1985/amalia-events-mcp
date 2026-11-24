@@ -5,6 +5,8 @@ import { claveNombre } from './dedup_amalia.mjs';
 import { municipioClave } from './clave-sesion.mjs';
 
 const MESES = { enero: 1, febrero: 2, marzo: 3, abril: 4, mayo: 5, junio: 6, julio: 7, agosto: 8, septiembre: 9, setiembre: 9, octubre: 10, noviembre: 11, diciembre: 12 };
+// Provincia inferida solo si al menos este número de eventos del catálogo con provincia respaldan el municipio.
+const MIN_RESPALDO = 2;
 const ISO = /^\d{4}-\d{2}-\d{2}$/;
 const valida = (y, m, d) => { const t = new Date(Date.UTC(y, m - 1, d)); return t.getUTCFullYear() === y && t.getUTCMonth() === m - 1 && t.getUTCDate() === d; };
 const pad = n => String(n).padStart(2, '0');
@@ -20,8 +22,11 @@ export function fechaDeAntiguo(d) {
       if (/Z$/i.test(dt)) return { fecha: null, motivo: 'dateTime_utc_ambiguo' };
       return { fecha: `${m[1]}-${m[2]}-${m[3]}`, origen: 'dateTime_iso' };
     }
-    m = /(\d{1,2})\s+de\s+([a-záéíóú]+)\s+de\s+(\d{4})/i.exec(dt);
-    if (m && MESES[m[2].toLowerCase().normalize('NFD').replace(/\p{M}/gu, '')] && valida(+m[3], MESES[m[2].toLowerCase().normalize('NFD').replace(/\p{M}/gu, '')], +m[1])) return { fecha: `${m[3]}-${pad(MESES[m[2].toLowerCase().normalize('NFD').replace(/\p{M}/gu, '')])}-${pad(+m[1])}`, origen: 'dateTime_texto' };
+    // Texto en español: solo si es una fecha (o un rango/lista de días del mismo mes) y se sabe el INICIO. «Hasta el…» o «a partir del…» no son la fecha de inicio: se omiten.
+    const mes = x => MESES[x.toLowerCase().normalize('NFD').replace(/\p{M}/gu, '')];
+    if (/\b(hasta|a partir|desde)\b/i.test(dt)) return { fecha: null, motivo: 'dateTime_texto_sin_inicio' };
+    m = /^(?:durante\s+el\s+fin\s+de\s+semana\s+d(?:el|e)\s+|del\s+)?(\d{1,2})(?:\s*(?:-|–|y|al|a)\s*\d{1,2})?\s+de\s+([a-záéíóú]+)\s+de\s+(\d{4})(?:\s*,\s*.*)?$/i.exec(dt);
+    if (m && mes(m[2]) && valida(+m[3], mes(m[2]), +m[1])) return { fecha: `${m[3]}-${pad(mes(m[2]))}-${pad(+m[1])}`, origen: 'dateTime_texto' };
     return { fecha: null, motivo: 'dateTime_no_interpretable' };
   }
   return { fecha: null, motivo: 'sin_fecha' };
@@ -42,7 +47,7 @@ export function tablaProvincias(rows) {
     const m = por.get(k) || new Map(); m.set(prov, (m.get(prov) || 0) + 1); por.set(k, m);
   }
   const out = new Map();
-  for (const [k, m] of por) if (m.size === 1) out.set(k, [...m.keys()][0]);
+  for (const [k, m] of por) if (m.size === 1) { const [prov, n] = [...m.entries()][0]; out.set(k, { provincia: prov, respaldo: n }); }
   return out;
 }
 /** rows: [{id,data,updateTime}]. Devuelve {cambios:[{id,version,updateTime,antes,despues,origen}], omitidos:{motivo:n}, resumen}. */
@@ -63,7 +68,8 @@ export function planNormalizacion(rows) {
     if (!texto(d.provincia)) {
       const c = despues.city || texto(d.city) || municipioDeAntiguo(d), objProv = texto(d.ubicacion && typeof d.ubicacion === 'object' ? d.ubicacion.provincia : '');
       if (objProv) { despues.provincia = objProv; antes.provincia = d.provincia ?? null; origen.provincia = 'ubicacion.provincia'; }
-      else if (c && provPorMuni.has(municipioClave(c))) { despues.provincia = provPorMuni.get(municipioClave(c)); antes.provincia = d.provincia ?? null; origen.provincia = 'unica_del_municipio'; }
+      else if (c && provPorMuni.has(municipioClave(c)) && provPorMuni.get(municipioClave(c)).respaldo >= MIN_RESPALDO) { despues.provincia = provPorMuni.get(municipioClave(c)).provincia; antes.provincia = d.provincia ?? null; origen.provincia = 'unica_del_municipio'; }
+      else if (c && provPorMuni.has(municipioClave(c))) omite('provincia_poco_respaldada', r.id);
       else omite(c ? 'provincia_desconocida' : 'provincia_sin_municipio', r.id);
     }
     const ks = Object.keys(despues);

@@ -165,6 +165,11 @@ Pruebas reproducibles: `FIRESTORE_EMULATOR_HOST=127.0.0.1:8686 AMALIA_TEST_PUBLI
 - Municipio con alias (`Lumbier/Irunberri`, `Donostia`/`San Sebastián`…, tabla ampliable en `clave-sesion.mjs`); una clave por **día** en rangos `fechaLocal`–`fechaFinLocal` (hasta 31 días); el tipo de recinto (teatro, auditorio, museo, iglesia, plaza…) ya no se quita; fecha/hora de eventos antiguos desde `dateTime` en hora de Madrid.
 - `rellenar_claves.mjs`: lo que sobra se libera, no se borra.
 
+## 2.25.11 — URL de origen + título bloquea; backfill más estricto (SIGUE EN SOMBRA)
+
+- **Bloqueo por URL + título:** si el candidato comparte URL de origen Y título normalizado (`claveNombre`: sin tildes, mayúsculas ni signos) con un evento existente, la coincidencia es bloqueante (`url_titulo`) aunque la fecha, la hora o el lugar sean otros. Solo la URL sigue siendo aviso (`url_fuente_otra_sesion`). Excepciones: el candidato es una sesión de un evento por sesiones (`temporalidad.tipo='sesiones'`) o ambos declaran un `sesionId` explícito distinto. Salida legítima para otra sesión de la misma página: `confirmarOtraSesion` (sesionId explícito + evidenciaUrl) en modo legacy; en modo `bloquea` decide Alfred por la cola.
+- **Backfill:** las fechas de texto exigen una fecha completa (o rango/lista de días: se toma el inicio); «Hasta el…», «a partir del…» y similares se omiten. La provincia solo se infiere si ≥2 eventos del catálogo respaldan el municipio.
+
 ## 2.25.10 — altas recientes indexadas, URL de origen y backfill de normalización (SIGUE EN SOMBRA)
 
 - **`listar_altas_recientes`** ya no recorre el catálogo: consulta por rango de `fechaCreacion` (descendente, índice de campo único), con `desde`/`hasta` en la consulta y el resto de filtros (autor, agente, provincia, permisos) sobre las filas de la ventana. Devuelve `totalExacto` (false si la ventana supera `AMALIA_ALTAS_MAX_LECTURAS`, 5.000: acota con desde/hasta). Los eventos antiguos sin `fechaCreacion` no se listan. El cursor pasa a `fechaCreacion|id` (los numéricos antiguos se siguen aceptando).

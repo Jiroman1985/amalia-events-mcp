@@ -106,7 +106,7 @@ export function reglaDuplicado(candidato,row){
 export function clasificarCoincidencias(entries,identity=r=>({eventId:r.eventId||r.id})){
  const coincidencias=[],informativas=[];
  for(const {row,motivos} of entries){
-  const tecnico=motivos.some(m=>m==='reserva_origen_exacta'||m==='identidad_calculada'),duplicado=motivos.includes('duplicado_sesion');
+  const tecnico=motivos.some(m=>m==='reserva_origen_exacta'||m==='identidad_calculada'||m==='url_titulo'),duplicado=motivos.includes('duplicado_sesion');
   const item={...identity(row),motivos};
   if(tecnico||duplicado)coincidencias.push({...item,confianza:'exacta'});
   else informativas.push({...item,confianza:motivos.includes('posible_duplicado')?'posible_duplicado':'informativa'});
@@ -147,7 +147,13 @@ export function escanearDuplicados(candidato, docs, {limite=5000, reservas=[]}={
   const dTitulo=normalizeText(leg(d,'titulo','nombre')),dCity=normalizeText(leg(d,'city','ciudad')||(typeof d.ubicacion==='string'?d.ubicacion:d.ubicacion?.municipio));
   const dFecha=leg(d,'fechaLocal','fecha_inicio')||d.dateTime?.slice(0,10)||null;
   const otraSesion=(fecha&&dFecha&&dFecha!==fecha)||(candidato.sesionExplicita!==false&&sesion&&d.sesionId&&d.sesionId!==sesion);
-  if(urls.length&&dUrls.some(u=>urls.includes(u)))add(r,otraSesion?'url_fuente_otra_sesion':'url_fuente');
+  if(urls.length&&dUrls.some(u=>urls.includes(u))){
+   add(r,otraSesion?'url_fuente_otra_sesion':'url_fuente');
+   // Misma URL de origen y mismo título normalizado: es el mismo evento (p. ej. reingresado con la fecha mal leída). Bloquea; solo la URL, no.
+   // Excepciones: el candidato es una sesión declarada de un evento por sesiones (temporalidad.tipo='sesiones'), o ambos declaran un sesionId EXPLÍCITO y distinto (fichas de varias sesiones del mismo evento, cada una con su identificador propio).
+   const sesionesDistintas=candidato.temporalidadTipo==='sesiones'||candidato.sesionExplicita===true&&d.sesionExplicita===true&&sesion&&d.sesionId&&d.sesionId!==sesion;
+   if(!sesionesDistintas&&claveNombre(candidato.titulo)&&claveNombre(candidato.titulo)===claveNombre(leg(d,'titulo','nombre')))add(r,'url_titulo');
+  }
   if(sourceIds.length&&dSourceIds.some(s=>sourceIds.includes(s)))add(r,otraSesion?'source_id_otra_sesion':'source_id');
   const cityConflict=city&&dCity&&dCity!==city;
   const sm=motivoSesion(candidato,r);if(sm)add(r,sm);
