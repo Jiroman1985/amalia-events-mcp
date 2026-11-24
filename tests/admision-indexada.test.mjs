@@ -31,7 +31,18 @@ const upd = (f, changes, o = {}) => f.events.update({ eventId: f.e.eventId, nego
 class IndexedStore extends MemoryStore {
   constructor() { super(); this.leidos = 0; this.consultas = []; }
   async write(c, id, data, o = {}) { if (c === 'eventos' && o.guard?.updateTime && this.rows.get('amalia_catalog_guard/eventos')?.updateTime !== o.guard.updateTime) throw new DomainError('version_conflict'); return super.write(c, id, data, o); }
-  async list(c, o) { if (c === 'eventos') throw new Error('full_scan_forbidden'); return super.list(c, o); }
+  async list(c, o = {}) {
+    if (c === 'eventos' && o.eq) { const [[campo, v]] = Object.entries(o.eq); const out = [...this.rows].filter(([k, r]) => k.startsWith('eventos/') && r.data[campo] === v).map(([k, r]) => ({ id: k.split('/').at(-1), ...structuredClone(r) })); this.leidos += out.length; return out; }
+    if (c === 'eventos') throw new Error('full_scan_forbidden'); return super.list(c, o);
+  }
+  async queryPagina(c, campo, { desde = null, hasta = null, despues = null, desc = true, limit = 500 } = {}) {
+    this.paginas = (this.paginas || 0) + 1;
+    let rows = [...this.rows].filter(([k, r]) => k.startsWith(c + '/') && typeof r.data[campo] === 'string' && (desde == null || r.data[campo] >= desde) && (hasta == null || r.data[campo] <= hasta)).map(([k, r]) => ({ id: k.split('/').at(-1), ...structuredClone(r) }));
+    const cmp = (a, b) => (a.data[campo] < b.data[campo] ? -1 : a.data[campo] > b.data[campo] ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0) * (desc ? -1 : 1);
+    rows.sort(cmp);
+    if (despues) rows = rows.filter(r => cmp(r, { data: { [campo]: despues.valor }, id: despues.id }) > 0);
+    rows = rows.slice(0, limit); this.leidos += rows.length; return rows;
+  }
   async queryRango(c, campo, desde, hasta) {
     const out = [...this.rows].filter(([k, r]) => k.startsWith(c + '/') && typeof r.data[campo] === 'string' && r.data[campo] >= desde && r.data[campo] <= hasta).map(([k, r]) => ({ id: k.split('/').at(-1), ...structuredClone(r) }));
     this.consultas.push({ campo, desde, hasta, n: out.length }); this.leidos += out.length; return out;
@@ -102,4 +113,39 @@ test('altas simultáneas: solo una entra aunque el catálogo sea grande', async 
   const { events } = await banco(5200);
   const r = await Promise.allSettled([events.create(nuevo({ fechaLocal: '2099-06-30' }), owner), events.create(nuevo({ fechaLocal: '2099-06-30', fuentes: [{ url: 'https://dos.es/x', checkedAt: '2026-11-01T10:00:00.000Z' }] }), owner)]);
   assert.equal(r.filter(x => x.status === 'fulfilled').length, 1);
+});
+
+// ---- listar_altas_recientes: consulta indexada por fechaCreacion ----
+const altas = (store, n, base = Date.UTC(2099, 0, 1)) => { for (let i = 0; i < n; i++) store.rows.set('eventos/ev_alta_' + String(i).padStart(5, '0'), { data: { negocioId: 'bizA', titulo: 'Alta ' + i, city: 'Almagro', provincia: i % 2 ? 'Ciudad Real' : 'Toledo', createdBy: i % 3 ? 'alfie' : 'conchi', fechaCreacion: new Date(base + i * 60000).toISOString(), fechaLocal: '2099-05-10', fuentes: [{ url: 'https://a.es/' + i }], version: 1 }, updateTime: '1' }); };
+
+test('listar_altas_recientes: ventana por fecha de alta sobre 5.200 eventos, sin recorrer el catálogo', async () => {
+  const { store, events } = await banco(5200); altas(store, 1000);
+  store.leidos = 0;
+  const desde = new Date(Date.UTC(2099, 0, 1, 15, 0)).toISOString(), hasta = new Date(Date.UTC(2099, 0, 1, 15, 59)).toISOString();
+  const r = await events.listRecentAdmissions({ desde, hasta, limit: 100 }, owner);
+  assert.equal(r.total, 60); assert.equal(r.items.length, 60); assert.equal(r.cursor, null); assert.equal(r.totalExacto, true);
+  assert.ok(r.items[0].fechaCreacion > r.items.at(-1).fechaCreacion, 'del más reciente al más antiguo');
+  assert.ok(store.leidos <= 60, 'solo se leen las altas de la ventana: ' + store.leidos);
+});
+
+test('listar_altas_recientes: filtros por autor/provincia, paginación con cursor y sin duplicados', async () => {
+  const { store, events } = await banco(300); altas(store, 400);
+  const todos = [], vistos = new Set(); let cursor = null;
+  do { const r = await events.listRecentAdmissions({ createdBy: 'alfie', provincia: 'Toledo', cursor, limit: 25 }, owner); for (const x of r.items) { assert.equal(vistos.has(x.eventId), false); vistos.add(x.eventId); todos.push(x); } cursor = r.cursor; } while (cursor);
+  const esperado = [...store.rows].filter(([k, r]) => k.startsWith('eventos/ev_alta_') && r.data.createdBy === 'alfie' && r.data.provincia === 'Toledo').length;
+  assert.equal(todos.length, esperado); assert.ok(todos.every((x, i) => i === 0 || todos[i - 1].fechaCreacion > x.fechaCreacion));
+  const sinPermiso = await events.listRecentAdmissions({}, { id: 'x', actions: ['read'], businesses: ['otro'] }); assert.equal(sinPermiso.total, 0);
+});
+
+// ---- misma URL de origen fuera de la ventana ----
+test('preparar_admision: reingreso con la fecha mal leída (fuera de ±1 día) se detecta por la misma URL de origen', async () => {
+  const { store, events } = await banco(5200);
+  const orig = await events.create(nuevo({ titulo: 'Fiesta de la vendimia', fechaLocal: '2099-03-01', fuentes: [{ url: 'https://agenda.es/vendimia', checkedAt: '2026-11-01T10:00:00.000Z' }] }), owner);
+  store.leidos = 0;
+  const p = await events.prepareAdmission(nuevo({ titulo: 'Fiesta de la vendimia', fechaLocal: '2099-09-09', fuentes: [{ url: 'https://agenda.es/vendimia', checkedAt: '2026-11-01T10:00:00.000Z' }] }), owner);
+  const hit = p.coincidencias.concat(p.informativas).find(c => c.eventId === orig.eventId);
+  assert.ok(hit, 'la misma URL fuera de la ventana se recupera'); assert.ok(hit.motivos.includes('url_fuente_otra_sesion'));
+  assert.ok(store.leidos < 100, 'lectura indexada, sin escaneo: ' + store.leidos);
+  const otra = await events.prepareAdmission(nuevo({ titulo: 'Otra cosa', fechaLocal: '2099-09-09', fuentes: [{ url: 'https://agenda.es/otra', checkedAt: '2026-11-01T10:00:00.000Z' }] }), owner);
+  assert.equal(otra.informativas.concat(otra.coincidencias).some(c => c.eventId === orig.eventId), false);
 });

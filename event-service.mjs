@@ -14,6 +14,8 @@ const LOTE_PRESUPUESTO_MS=Number(process.env.AMALIA_LOTE_PRESUPUESTO_MS||38000);
 const UNIVERSE_LOAD_MS=Number(process.env.AMALIA_UNIVERSE_LOAD_MS||40000);
 // Tope de seguridad SOLO para las herramientas que recorren todo el catálogo (buscar_duplicados_global, programas); la admisión ya no lo usa.
 const UNIVERSE_MAX_DOCS=Number(process.env.AMALIA_UNIVERSE_MAX_DOCS||100000);
+// Lecturas máximas de listar_altas_recientes por llamada (para calcular `total`); si se alcanzan, totalExacto=false y se sigue con el cursor.
+const ALTAS_MAX_LECTURAS=Number(process.env.AMALIA_ALTAS_MAX_LECTURAS||5000);
 const UNIVERSE_TTL_MS=Number(process.env.AMALIA_UNIVERSE_TTL_MS||600000);
 export class EventService {
  constructor(store,media,options={}) {this.clavesModo=options.claves??process.env.AMALIA_CLAVES??'off';this.store=store;this.media=media;this.programs=options.programs||new ProgramAdmission(store);this.inflight=new Map();this.outcomes=new Map();this.registryOptions={cutoff:options.registryCutoff??process.env.AMALIA_FUENTES_V2_DESDE_ISO,now:options.now};if(typeof store.listAll==='function'&&options.warm!==false&&this.clavesModo!=='bloquea'){const write=store.write.bind(store);store.write=async(...a)=>{const r=await write(...a);if(a[0]==='eventos'){const patched=await this.patchUniverse(a,r).catch(()=>false);if(!patched)setTimeout(()=>this.warm(),0);}return r;};setTimeout(()=>this.warm(),0);}}
@@ -131,6 +133,9 @@ export class EventService {
    for(const r of [...a,...b,...c])add(r);
   }
   for(const id of identidadesCalculadas(e))add(await this.store.get('eventos',id));
+  // Misma URL de origen en cualquier fecha: lectura indexada (igualdad sobre link y enlace_original), para detectar un reingreso con la fecha mal leída fuera de la ventana.
+  const urlsOrigen=[...new Set([...(e.fuentes||[]).map(s=>s?.url),e.link].filter(u=>typeof u==='string'&&u))].slice(0,10),porUrl=new Set();
+  for(const u of urlsOrigen)for(const campo of ['link','enlace_original'])for(const r of await this.store.list('eventos',{eq:{[campo]:u},limit:50}))if(r.data?.[campo]===u){add(r);porUrl.add(r.id);}
   const reservas=[];
   if(e.origen){
    const held=await this.store.get('amalia_event_reservations',originKey(e.origen));
@@ -139,7 +144,7 @@ export class EventService {
   const muni=municipioClave(e.city||''),prov=claveNombre(e.provincia||'');
   const mismoLugar=r=>{const d=r.data||{},c=leg(d,'city','ciudad')||(typeof d.ubicacion==='string'?d.ubicacion:d.ubicacion?.municipio),p=claveNombre(d.provincia||(d.ubicacion&&d.ubicacion.provincia)||'');
    if(!muni||!c)return true;if(municipioClave(c)===muni)return true;return !!(prov&&p&&p===prov);};
-  const idsFijos=new Set([...identidadesCalculadas(e),...reservas.map(r=>r.eventId)]);
+  const idsFijos=new Set([...identidadesCalculadas(e),...reservas.map(r=>r.eventId),...porUrl]);
   const docs=[...porId.values()].filter(r=>idsFijos.has(r.id)||mismoLugar(r));
   return {guard,docs,reservas};
  }
@@ -556,19 +561,37 @@ export class EventService {
   authorize(principal,null,'read');
   const ms=(v,name)=>{if(v==null)return null;const t=Date.parse(v);if(!Number.isFinite(t))fail('invalid_date',{campo:name,ayuda:'Usa una fecha ISO 8601, p. ej. 2026-11-19T00:00:00+01:00.'});return t;};
   const d0=ms(desde,'desde'),d1=ms(hasta,'hasta'),prov=provincia?normalizeText(provincia):null,n=Math.min(Math.max(Number(limit)||50,1),100);
-  let after=null;if(cursor){const i=String(cursor).indexOf('|');if(i<1||!/^[A-Za-z0-9_-]{1,128}$/.test(String(cursor).slice(i+1)))fail('invalid_cursor');after={t:Number(String(cursor).slice(0,i)),id:String(cursor).slice(i+1)};if(!Number.isFinite(after.t))fail('invalid_cursor');}
+  let after=null;if(cursor){const i=String(cursor).indexOf('|');if(i<1||!/^[A-Za-z0-9_-]{1,128}$/.test(String(cursor).slice(i+1)))fail('invalid_cursor');const head=String(cursor).slice(0,i),id=String(cursor).slice(i+1),t=/^-?\d+$/.test(head)?Number(head):Date.parse(head);if(!Number.isFinite(t))fail('invalid_cursor');after={t,id,valor:/^-?\d+$/.test(head)?new Date(t).toISOString():head};}
+  const pasa=x=>{
+   if(x.retirado===true||x.prueba===true)return false;
+   if(!principal.actions.includes('*')&&!principal.businesses.includes('*')&&!principal.businesses.includes(x.negocioId))return false;
+   if(createdBy&&x.createdBy!==createdBy)return false;
+   if(agente&&agenteCanonico(x.agenteCanonico||x.createdBy)!==agenteCanonico(agente))return false;
+   if(prov&&normalizeText(x.provincia)!==prov)return false;
+   return true;
+  };
+  const fila=(id,x)=>({eventId:id,negocioId:x.negocioId,titulo:x.titulo||x.nombre||null,city:x.city||null,provincia:x.provincia||null,createdBy:x.createdBy||null,agente:x.createdBy||x.agenteCanonico?agenteCanonico(x.agenteCanonico||x.createdBy):null,fechaCreacion:x.fechaCreacion||null,requestId:x.requestId||null});
+  if(typeof this.store.queryPagina==='function'){
+   // Consulta indexada por fechaCreacion (descendente) dentro de [desde, hasta]: solo se leen las altas de la ventana, nunca el catálogo. Los eventos antiguos sin fechaCreacion no tienen alta registrada y no se listan.
+   const iso=t=>new Date(t).toISOString(),items=[];let total=0,despues=after?{valor:after.valor,id:after.id}:null,leidos=0,siguiente=null,exacto=true;
+   for(;;){
+    const page=await this.store.queryPagina('eventos','fechaCreacion',{desde:d0!=null?iso(d0):null,hasta:d1!=null?iso(d1):null,despues,desc:true,limit:500});
+    leidos+=page.length;
+    for(const r of page){if(!pasa(r.data||{}))continue;total++;if(items.length<n)items.push(fila(r.id,r.data));else if(items.length===n&&!siguiente)siguiente=`${items.at(-1).fechaCreacion}|${items.at(-1).eventId}`;}
+    if(page.length<500)break;
+    const last=page.at(-1);despues={valor:last.data.fechaCreacion,id:last.id};
+    if(leidos>=ALTAS_MAX_LECTURAS){exacto=false;if(!siguiente)siguiente=`${despues.valor}|${despues.id}`;break;}
+   }
+   return {items,total,totalExacto:exacto,cursor:siguiente};
+  }
   const universe=await this.catalogUniverse();
   const rows=[];
   for(const r of universe.docs){
    const x=r.data||{};
-   if(x.retirado===true||x.prueba===true)continue;
-   if(!principal.actions.includes('*')&&!principal.businesses.includes('*')&&!principal.businesses.includes(x.negocioId))continue;
-   if(createdBy&&x.createdBy!==createdBy)continue;
-   if(agente&&agenteCanonico(x.agenteCanonico||x.createdBy)!==agenteCanonico(agente))continue;
+   if(!pasa(x))continue;
    const t=x.fechaCreacion?Date.parse(x.fechaCreacion):NaN,has=Number.isFinite(t);
    if((d0!=null||d1!=null)&&!has)continue;
    if(d0!=null&&t<d0)continue;if(d1!=null&&t>d1)continue;
-   if(prov&&normalizeText(x.provincia)!==prov)continue;
    rows.push({id:r.id,t:has?t:-Infinity,x});
   }
   rows.sort((a,b)=>b.t!==a.t?(b.t>a.t?1:-1):(a.id<b.id?1:a.id>b.id?-1:0));
@@ -576,7 +599,7 @@ export class EventService {
   const start=after?rows.findIndex(r=>key(r)<after.t||(key(r)===after.t&&r.id<after.id)):0;
   const page=start<0?[]:rows.slice(start,start+n);
   const last=page.at(-1),more=start>=0&&start+n<rows.length;
-  return {items:page.map(({id:eventId,x})=>({eventId,negocioId:x.negocioId,titulo:x.titulo||x.nombre||null,city:x.city||null,provincia:x.provincia||null,createdBy:x.createdBy||null,agente:x.createdBy||x.agenteCanonico?agenteCanonico(x.agenteCanonico||x.createdBy):null,fechaCreacion:x.fechaCreacion||null,requestId:x.requestId||null})),total:rows.length,cursor:more&&last?`${key(last)}|${last.id}`:null};
+  return {items:page.map(({id,x})=>fila(id,x)),total:rows.length,totalExacto:true,cursor:more&&last?`${key(last)}|${last.id}`:null};
  }
  async list({negocioId,cursor,limit=50,desde,hasta,incluirRetirados=false},principal) {authorize(principal,negocioId,'read');await this.business(negocioId);const rows=await this.store.list('eventos',{business:negocioId,cursor,limit});return {eventos:rows.filter(r=>(incluirRetirados||r.data.retirado!==true)&&(!desde||(r.data.fechaLocal||r.data.dateTime?.slice(0,10))>=desde)&&(!hasta||(r.data.fechaLocal||r.data.dateTime?.slice(0,10))<=hasta)).map(r=>({eventId:r.id,...r.data})),nextCursor:rows.length===limit?rows.at(-1).id:null};}
  async findDuplicates(input,principal) {

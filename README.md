@@ -165,6 +165,12 @@ Pruebas reproducibles: `FIRESTORE_EMULATOR_HOST=127.0.0.1:8686 AMALIA_TEST_PUBLI
 - Municipio con alias (`Lumbier/Irunberri`, `Donostia`/`San Sebastián`…, tabla ampliable en `clave-sesion.mjs`); una clave por **día** en rangos `fechaLocal`–`fechaFinLocal` (hasta 31 días); el tipo de recinto (teatro, auditorio, museo, iglesia, plaza…) ya no se quita; fecha/hora de eventos antiguos desde `dateTime` en hora de Madrid.
 - `rellenar_claves.mjs`: lo que sobra se libera, no se borra.
 
+## 2.25.10 — altas recientes indexadas, URL de origen y backfill de normalización (SIGUE EN SOMBRA)
+
+- **`listar_altas_recientes`** ya no recorre el catálogo: consulta por rango de `fechaCreacion` (descendente, índice de campo único), con `desde`/`hasta` en la consulta y el resto de filtros (autor, agente, provincia, permisos) sobre las filas de la ventana. Devuelve `totalExacto` (false si la ventana supera `AMALIA_ALTAS_MAX_LECTURAS`, 5.000: acota con desde/hasta). Los eventos antiguos sin `fechaCreacion` no se listan. El cursor pasa a `fechaCreacion|id` (los numéricos antiguos se siguen aceptando).
+- **Misma URL de origen:** `preparar_admision` busca por igualdad indexada en `link` y `enlace_original` (hasta 10 URLs del candidato, 500 filas por URL) y añade esos eventos al universo aunque estén fuera de la ventana de ±1 día ni del mismo municipio: un reingreso con la fecha mal leída aparece como `url_fuente_otra_sesion` (informativo, como antes). No se cubren URLs que solo estén en `fuentes[1..]`.
+- **`backfill_normalizar.mjs`** (dry-run por defecto; `--aplicar --confirmo <huella>`): rellena `fechaLocal` (de `fecha_inicio`, `dateTime` ISO con desfase o texto «22 de marzo de 2026»; los instantes UTC se omiten por ambiguos), `city` (de ciudad/town/ubicación) y `provincia` (de `ubicacion.provincia` o la única provincia del municipio en el catálogo). Nunca pisa valores; escribe en lotes atómicos con versión+1, auditoría y guardia, y marca `normalizacion_backfill_v1`.
+
 ## 2.25.9 — admisión sin escanear el catálogo (SIGUE EN SOMBRA)
 
 - **Causa:** `preparar_admision`/`admitir_candidato` leían los ~5.000 eventos para comparar y, al superar el tope, daban `incomplete_scan` / `catalog_limit_exceeded`.

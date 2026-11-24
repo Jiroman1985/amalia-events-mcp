@@ -73,6 +73,18 @@ export class FirestoreStore {
       const last=page.at(-1);after={valor:last.data[campo],id:last.id};
     }
   }
+  // Una página de documentos ordenados por `campo` (texto ISO) y por id, con rango opcional [desde, hasta] y cursor {valor,id}. Índice de campo único; nunca recorre la colección.
+  async queryPagina(collection,campo,{desde=null,hasta=null,despues=null,desc=true,limit=500}={}) {
+    if(!/^[A-Za-z_][A-Za-z0-9_]*$/.test(campo))fail('invalid_field',{campo});
+    const f=(op,v)=>({fieldFilter:{field:{fieldPath:campo},op,value:{stringValue:v}}}),filters=[];
+    if(desde!=null)filters.push(f('GREATER_THAN_OR_EQUAL',desde));if(hasta!=null)filters.push(f('LESS_THAN_OR_EQUAL',hasta));
+    const dir=desc?'DESCENDING':'ASCENDING',query={from:[{collectionId:collection}],orderBy:[{field:{fieldPath:campo},direction:dir},{field:{fieldPath:'__name__'},direction:dir}],limit};
+    if(filters.length)query.where=filters.length===1?filters[0]:{compositeFilter:{op:'AND',filters}};
+    if(despues)query.startAt={values:[{stringValue:despues.valor},{referenceValue:`${this.prefix}/${collection}/${id(despues.id)}`}],before:false};
+    const rows=await this.request(':runQuery',{method:'POST',body:JSON.stringify({structuredQuery:query})});
+    if(!Array.isArray(rows))fail('incomplete_scan');
+    return rows.filter(r=>r.document).map(r=>({id:r.document.name.split('/').at(-1),data:decodeFields(r.document.fields),updateTime:r.document.updateTime}));
+  }
   // Lee una colección entera en paralelo: primero solo los ids (barato) y luego tramos acotados por id (startAt/endAt) para que no queden huecos aunque entren documentos mientras tanto.
   async listAll(collection,{max=Infinity,step=250,concurrency=2}={}) {
     const ids=[];let cursor=null;
