@@ -19,7 +19,7 @@ import { conPlazo,DomainError,authorize,authorizeCapture,fail,hash,id,httpsUrl,d
 import { buscarFuente,registrarFuente,actualizarFuente,CANALES,AMBITOS } from './registro-fuentes.mjs';
 import { conIdentidad } from './identidad.mjs';
 import { publicarTarea,actualizarTarea,listarTareas,misTareas,resumenTareas } from './tareas.mjs';
-import { publicar,responder,listar as listarTablon,misPendientes,marcarLeido,resolver as resolverHilo,decidirHilo,autocerrar as autocerrarTablon,TIPOS as TABLON_TIPOS } from './tablon.mjs';
+import { publicar,responder,listar as listarTablon,misPendientes,marcarLeido,resolver as resolverHilo,decidirHilo,barrido as barridoTablon,TIPOS as TABLON_TIPOS } from './tablon.mjs';
 import { listarZonas,asignarZona,asignarZonasLote,reasignarFuentesZona,repartirFuentes } from './zonas.mjs';
 import { fusionarFuentes } from './fusion-fuentes.mjs';
 import { marcarRevisada,listarVencidas,resumenFuentes,buscarFichas } from './fuentes-consultas.mjs';
@@ -33,7 +33,7 @@ process.on('uncaughtException',err=>{console.error(JSON.stringify({event:'uncaug
 process.on('unhandledRejection',reason=>{console.error(JSON.stringify({event:'unhandled_rejection',code:reason?.code||null,message:String(reason?.message||reason).slice(0,200)}));});
 
 
-export const VERSION='2.25.16';
+export const VERSION='2.25.17';
 const ID=z.string().regex(/^[A-Za-z0-9_-]{1,128}$/),BUSINESS={negocioId:ID},EVENT={...BUSINESS,eventId:ID},PIECE={...BUSINESS,pieceId:ID};
 const RIGHTS=z.object({status:z.enum(['unknown','owned','licensed','permission','public_domain']),evidence:z.string().max(2000).optional(),credit:z.string().max(500).optional()});
 const SOURCE=z.object({url:z.string().url(),checkedAt:z.string().datetime({offset:true}).nullable().optional(),sourceId:z.string().max(300).optional()});
@@ -210,7 +210,7 @@ export async function boot(){
  const kalma=new KalmaExport({events,media,editorial,config:config.kalma,key:env.KALMA_BRIDGE_KEY_FILE?readFileSync(env.KALMA_BRIDGE_KEY_FILE,'utf8').trim():null});
  const registry=[{id:'conchi-owner',tokenHash:hash(env.MCP_TOKEN),actions:['*'],businesses:['*']},...(env.ACCESS_REGISTRY?JSON.parse(readFileSync(env.ACCESS_REGISTRY,'utf8')):[])];
  const app=createApp({store,events,media,editorial,kalma,publicBase},registry);app.listen(Number(env.PORT||3120),env.HOST||'127.0.0.1',()=>console.log(`AMALIA events ${VERSION} ready`));
- // Barrido del autocierre del tablón (aviso, nota, asignacion): cada 5 min; AMALIA_AUTOCIERRE_MS=0 lo desactiva.
- const barridoMs=Number(env.AMALIA_AUTOCIERRE_MS??300000);if(barridoMs>0){const timer=setInterval(()=>autocerrarTablon(store).catch(e=>console.error(JSON.stringify({event:'autocierre_error',error:e?.code||'error'}))),barridoMs);timer.unref?.();}
+ // Barrido del tablón (autocierre de aviso/nota/asignacion y recálculo de requiere_atencion): cada 5 min; AMALIA_AUTOCIERRE_MS=0 lo desactiva.
+ const barridoMs=Number(env.AMALIA_AUTOCIERRE_MS??300000);if(barridoMs>0){const timer=setInterval(()=>barridoTablon(store).catch(e=>console.error(JSON.stringify({event:'autocierre_error',error:e?.code||'error'}))),barridoMs);timer.unref?.();}
  return app;
 }

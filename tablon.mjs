@@ -15,6 +15,8 @@ const AGENTE_RE = /^[a-z0-9_-]{2,40}$/;
 const AUTOCIERRE = new Set(['aviso', 'nota', 'asignacion']), AUTOCIERRE_MS = 6 * 60 * 60 * 1000;
 // «Necesita tu atención»: hilo abierto, urgente, y de un tipo que pide decisión (duda, ayuda, cambio_zona) o que espera a alguien concreto (esperaA).
 const TIPOS_ATENCION = new Set(['duda', 'ayuda', 'cambio_zona']);
+// Se guarda en el documento RAÍZ de cada hilo (colección tablon_agentes, campo booleano `requiere_atencion`) y se recalcula en cada cambio del hilo y en el barrido.
+export const CAMPO_ATENCION = 'requiere_atencion';
 export const requiereAtencion = raiz => raiz.estado === 'abierto' && raiz.prioridad === 'urgente' && (TIPOS_ATENCION.has(raiz.tipo) || !!raiz.espera_a);
 const MAX_POR_VENTANA = 30, VENTANA_MS = 10 * 60 * 1000;
 const recientes = new Map();
@@ -58,6 +60,7 @@ export async function publicar(store, input, principal, { now = () => new Date()
     destinatarios: destinatarios(input.destinatarios, input.tipo, A_ALFRED.has(input.tipo) ? ['alfred'] : ['todos']), prioridad: input.prioridad === 'urgente' ? 'urgente' : 'normal', estado: 'abierto', referencias: referencias(input.referencias), creado_en: now(),
     ...(input.esperaA ? { espera_a: text(input.esperaA, 2, 80, 'board_espera_a_invalido') } : {})
   };
+  d.requiere_atencion = requiereAtencion(d);
   await store.write(COL, id, d, { create: true });
   return { publicado: true, id, hilo: id, autor: d.autor, destinatarios: d.destinatarios, mensaje: A_ALFRED.has(d.tipo) ? 'Mensaje publicado. Alfred decide en caso de duda: espera su respuesta antes de actuar.' : 'Mensaje publicado.' };
 }
@@ -70,6 +73,7 @@ export async function responder(store, input, principal, { now = () => new Date(
   const yo = agenteDe(principal.id), def = [...new Set([raiz.data.agente, ...raiz.data.destinatarios].filter(x => x && x !== yo))];
   const id = nuevoId(), d = { id, hilo: raiz.id, es_raiz: false, autor: yo, principal: principal.id, agente: yo, tipo, asunto: raiz.data.asunto, texto: text(input.texto, 1, 2000, 'board_texto_invalido'), destinatarios: destinatarios(input.destinatarios, tipo, def.length ? def : ['todos']), prioridad: raiz.data.prioridad, estado: 'abierto', referencias: referencias(input.referencias), creado_en: now() };
   await store.write(COL, id, d, { create: true });
+  await recalcularSeguro(store, raiz.id);
   return { publicado: true, id, hilo: raiz.id, autor: d.autor, destinatarios: d.destinatarios };
 }
 
@@ -126,7 +130,7 @@ export async function marcarLeido(store, input, principal, { now = () => new Dat
   if (!input.todos && (!input.hilo || !hilos.has(input.hilo))) fail('board_hilo_no_encontrado', { hilo: input.hilo || null });
   for (let intento = 0; intento < 3; intento++) {
     const { row, hilos: vistos } = await lecturasDe(store, yo), t = now(); const nuevo = { ...vistos }; for (const id of ids) nuevo[id] = t;
-    try { await store.write(LEC, yo, { agente: yo, hilos: nuevo, actualizado_en: t }, row ? { updateTime: row.updateTime } : { create: true }); await autocerrarSeguro(store, hilos, now); return { leido: ids.length, agente: yo }; }
+    try { await store.write(LEC, yo, { agente: yo, hilos: nuevo, actualizado_en: t }, row ? { updateTime: row.updateTime } : { create: true }); await autocerrarSeguro(store, hilos, now); await recalcularSeguro(store, null, hilos, ids); return { leido: ids.length, agente: yo }; }
     catch (e) { if (e.code !== 'version_conflict' || intento === 2) throw e; }
   }
 }
@@ -149,17 +153,53 @@ export async function autocerrar(store, { now = () => new Date().toISOString(), 
     if (!leido && !vencido) continue;
     const fresca = await store.get(COL, id); if (!fresca || fresca.data.estado !== 'abierto') continue;
     const t = now(), motivo = leido ? 'leido_por_todos' : 'seis_horas';
-    try { await store.write(COL, id, { ...fresca.data, estado: 'resuelto', resuelto_por: 'sistema', resuelto_por_principal: 'sistema', resuelto_en: t, nota: 'autocierre', autocierre_motivo: motivo }, { updateTime: fresca.updateTime }); }
+    try { await store.write(COL, id, { ...fresca.data, estado: 'resuelto', resuelto_por: 'sistema', resuelto_por_principal: 'sistema', resuelto_en: t, nota: 'autocierre', autocierre_motivo: motivo, requiere_atencion: false }, { updateTime: fresca.updateTime }); }
     catch (e) { if (e.code === 'version_conflict') continue; throw e; }
-    raiz.estado = 'resuelto'; raiz.resuelto_por = 'sistema'; raiz.nota = 'autocierre'; cerrados.push({ hilo: id, motivo });
+    raiz.estado = 'resuelto'; raiz.resuelto_por = 'sistema'; raiz.nota = 'autocierre'; raiz.requiere_atencion = false; cerrados.push({ hilo: id, motivo });
   }
   return cerrados;
 }
 // En lecturas y marcas de lectura el autocierre es de mejor esfuerzo: un fallo nunca rompe la consulta.
 const autocerrarSeguro = async (store, hilos, now) => { try { await autocerrar(store, { now, hilos }); } catch { /* se reintenta en la siguiente lectura o barrido */ } };
 
+/**
+ * Recalcula `requiere_atencion` en el documento raíz de los hilos (todos, o solo `ids`) y escribe SOLO los que difieren de lo guardado.
+ * Devuelve los ids corregidos. Se llama tras cada cambio del hilo y en el barrido.
+ */
+export async function recalcularAtencion(store, { hilos = null, ids = null } = {}) {
+  hilos = hilos || agrupar(await todos(store, COL));
+  const corregidos = [];
+  for (const [id, l] of hilos) {
+    if (ids && !ids.includes(id)) continue;
+    const raiz = l.find(x => x.es_raiz); if (!raiz || raiz[CAMPO_ATENCION] === requiereAtencion(raiz)) continue;
+    const fresca = await store.get(COL, id); if (!fresca || fresca.data.es_raiz !== true) continue;
+    const v = requiereAtencion(fresca.data); if (fresca.data[CAMPO_ATENCION] === v) { raiz[CAMPO_ATENCION] = v; continue; }
+    try { await store.write(COL, id, { ...fresca.data, [CAMPO_ATENCION]: v }, { updateTime: fresca.updateTime }); raiz[CAMPO_ATENCION] = v; corregidos.push(id); }
+    catch (e) { if (e.code !== 'version_conflict') throw e; }
+  }
+  return corregidos;
+}
+/** Tras un cambio de un hilo concreto (o de varios, con su mapa en memoria): mejor esfuerzo, un fallo nunca rompe la operación; el barrido lo corrige. */
+async function recalcularSeguro(store, hiloId, hilos = null, ids = null) {
+  try {
+    if (hiloId) { const raiz = await store.get(COL, hiloId); if (!raiz || raiz.data.es_raiz !== true) return; const v = requiereAtencion(raiz.data); if (raiz.data[CAMPO_ATENCION] !== v) await store.write(COL, hiloId, { ...raiz.data, [CAMPO_ATENCION]: v }, { updateTime: raiz.updateTime }); }
+    else await recalcularAtencion(store, { hilos, ids });
+  } catch { /* lo corrige el siguiente cambio o el barrido */ }
+}
+/** Plan puro (para el backfill): raíces cuyo `requiere_atencion` guardado falta o no coincide con el valor calculado. */
+export function planAtencion(rows) {
+  const raices = rows.filter(r => r.data?.es_raiz === true), cambios = raices.filter(r => r.data[CAMPO_ATENCION] !== requiereAtencion(r.data)).map(r => ({ id: r.id, antes: r.data[CAMPO_ATENCION] ?? null, despues: requiereAtencion(r.data) }));
+  return { raices: raices.length, aTrue: raices.filter(r => requiereAtencion(r.data)).length, cambios };
+}
+/** Barrido periódico: autocierre y recálculo de requiere_atencion en todas las raíces. */
+export async function barrido(store, { now = () => new Date().toISOString() } = {}) {
+  const hilos = agrupar(await todos(store, COL)), cerrados = await autocerrar(store, { now, hilos }), corregidos = await recalcularAtencion(store, { hilos });
+  return { cerrados, corregidos };
+}
+
 async function cerrar(store, raiz, principal, extra, now) {
   const d = { ...raiz.data, estado: 'resuelto', resuelto_por: agenteDe(principal.id), resuelto_por_principal: principal.id, resuelto_en: now(), ...extra };
+  d.requiere_atencion = requiereAtencion(d);
   await store.write(COL, raiz.id, d, { updateTime: raiz.updateTime }); return d;
 }
 export async function resolver(store, input, principal, { now = () => new Date().toISOString() } = {}) {
@@ -184,6 +224,7 @@ export async function decidirHilo(store, input, principal, { now = () => new Dat
   const id = nuevoId(), yo = agenteDe(principal.id), def = [...new Set([raiz.data.agente, ...raiz.data.destinatarios].filter(x => x && x !== yo))];
   await store.write(COL, id, { id, hilo: raiz.id, es_raiz: false, autor: yo, principal: principal.id, agente: yo, tipo: 'decision', asunto: raiz.data.asunto, texto: text(input.decision, 1, 2000, 'board_texto_invalido'), destinatarios: def.length ? def : ['todos'], prioridad: raiz.data.prioridad, estado: 'abierto', referencias: referencias(input.referencias), creado_en: now() }, { create: true });
   if (input.cerrar !== false && raiz.data.estado !== 'resuelto') await cerrar(store, await store.get(COL, raiz.id), principal, { decision_id: id }, now);
+  await recalcularSeguro(store, raiz.id);
   return { decidido: true, hilo: raiz.id, decisionId: id, cerrado: input.cerrar !== false };
 }
 

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { publicar, responder, listar, misPendientes, marcarLeido, resolver, decidirHilo, agenteDe } from '../tablon.mjs';
+import { publicar, responder, listar, misPendientes, marcarLeido, resolver, decidirHilo, agenteDe, recalcularAtencion, planAtencion, barrido, CAMPO_ATENCION } from '../tablon.mjs';
 import { listarZonas, asignarZona, reasignarFuentesZona } from '../zonas.mjs';
 
 class Store {
@@ -200,4 +200,65 @@ test('requiereAtencion: abierto + urgente + (duda, ayuda, cambio_zona o con espe
   const mp = await misPendientes(s, alfred, ahora); assert.ok(mp.pendientes.filter(i => i.requiereAtencion).every(i => i.prioridad === 'urgente'));
   assert.equal(mp.requierenAtencion, mp.pendientes.filter(i => i.requiereAtencion).length);
   assert.equal(await code(publicar(s, { tipo: 'nota', asunto: 'Mala espera', texto: 'x', esperaA: 'x' }, alfie)), 'board_espera_a_invalido');
+});
+
+// ---- requiere_atencion guardado en la raíz del hilo (tablon_agentes) ----
+let nTest = 0; const frescos = () => { nTest++; return { autor: P('ra-autor-' + nTest, ['read', 'board']), adm: P('ra-adm-' + nTest, ['read', 'board', 'board_admin']) }; };
+const ra = (s, id) => s.docs.get('tablon_agentes/' + id).data.requiere_atencion;
+const T1 = { now: () => '2026-11-21T10:30:00.000Z' };
+
+test('requiere_atencion: se guarda en el documento raíz al publicar (campo booleano exacto)', async () => {
+  assert.equal(CAMPO_ATENCION, 'requiere_atencion');
+  const s = new Store(), ids = {}, { autor: alfie } = frescos();
+  const pub = async (k, o) => { ids[k] = (await publicar(s, { asunto: 'Caso ' + k, texto: 'x', ...o }, alfie, { now })).id; };
+  await pub('duda_u', { tipo: 'duda', prioridad: 'urgente' }); await pub('duda_n', { tipo: 'duda' }); await pub('aviso_u', { tipo: 'aviso', prioridad: 'urgente', destinatarios: ['conchi'] });
+  await pub('aviso_u_espera', { tipo: 'aviso', prioridad: 'urgente', destinatarios: ['conchi'], esperaA: 'José Ignacio' });
+  assert.deepEqual([ra(s, ids.duda_u), ra(s, ids.duda_n), ra(s, ids.aviso_u), ra(s, ids.aviso_u_espera)], [true, false, false, true]);
+  assert.ok(s.writes.every(w => w.c === 'tablon_agentes'));
+});
+
+test('requiere_atencion: resolver, decidir (y decidir sin cerrar) y el autocierre lo recalculan', async () => {
+  const s = new Store(), t = n => en(T0, n * 1000), { autor: alfie, adm: alfred } = frescos();
+  const a = await publicar(s, { tipo: 'duda', asunto: 'Duda a', texto: 'x', prioridad: 'urgente' }, alfie, { now }), b = await publicar(s, { tipo: 'ayuda', asunto: 'Ayuda b', texto: 'x', prioridad: 'urgente' }, alfie, { now });
+  const c = await publicar(s, { tipo: 'cambio_zona', asunto: 'Zona c', texto: 'x', prioridad: 'urgente' }, alfie, { now }), d = await publicar(s, { tipo: 'aviso', asunto: 'Aviso d', texto: 'x', prioridad: 'urgente', destinatarios: ['conchi'], esperaA: 'Alfred' }, alfie, { now: t(0) });
+  assert.deepEqual([a, b, c, d].map(x => ra(s, x.id)), [true, true, true, true]);
+  await resolver(s, { hilo: a.id, nota: 'ok' }, alfred, { now }); assert.equal(ra(s, a.id), false);
+  await decidirHilo(s, { hilo: b.id, decision: 'Hecho', cerrar: false }, alfred, { now }); assert.equal(ra(s, b.id), true, 'sigue abierto');
+  await decidirHilo(s, { hilo: c.id, decision: 'Hecho' }, alfred, { now }); assert.equal(ra(s, c.id), false);
+  await listar(s, {}, alfred, { now: en(T0, 6 * 3600 * 1000) }); assert.equal(hilo(s, d.id).estado, 'resuelto'); assert.equal(ra(s, d.id), false, 'el autocierre lo baja a false');
+  assert.ok([a, b, c, d].every(x => typeof ra(s, x.id) === 'boolean'));
+});
+
+test('requiere_atencion: responder y marcar_leido corrigen un valor ausente o desfasado sin tocar lo correcto', async () => {
+  const s = new Store(), { autor: alfie, adm: alfred } = frescos(), a = await publicar(s, { tipo: 'duda', asunto: 'Duda a', texto: 'x', prioridad: 'urgente' }, alfie, { now }), b = await publicar(s, { tipo: 'duda', asunto: 'Duda b', texto: 'x' }, alfie, { now });
+  const raiz = id => s.docs.get('tablon_agentes/' + id);
+  delete raiz(a.id).data.requiere_atencion; raiz(b.id).data.requiere_atencion = true;   // hilo antiguo sin campo y otro desfasado
+  await responder(s, { hilo: a.id, texto: 'miro' }, alfred, { now }); assert.equal(ra(s, a.id), true);
+  const antes = s.writes.length; await responder(s, { hilo: a.id, texto: 'otra' }, alfred, { now });
+  assert.equal(s.writes.filter((w, i) => i >= antes && w.id === a.id).length, 0, 'ya estaba bien: no se reescribe la raíz');
+  await marcarLeido(s, { todos: true }, alfred, { now }); assert.equal(ra(s, b.id), false);
+  assert.ok([...s.docs.values()].filter(r => r.data.es_raiz === false).every(r => !('requiere_atencion' in r.data)), 'las respuestas no llevan el campo');
+});
+
+test('requiere_atencion: el barrido (autocierre + recálculo) corrige todo el tablón', async () => {
+  const s = new Store(), ids = [], { autor: alfie } = frescos();
+  for (let i = 0; i < 6; i++) ids.push((await publicar(s, { tipo: i % 2 ? 'duda' : 'aviso', asunto: 'Hilo ' + i, texto: 'x', prioridad: 'urgente', destinatarios: i % 2 ? undefined : ['conchi'], esperaA: i === 0 ? 'Alfred' : undefined }, alfie, { now })).id);
+  for (const id of ids) delete s.docs.get('tablon_agentes/' + id).data.requiere_atencion;
+  const r = await barrido(s, T1); assert.equal(r.corregidos.length, 6);
+  assert.deepEqual(ids.map(id => ra(s, id)), [true, true, false, true, false, true]);
+  const r2 = await barrido(s, T1); assert.deepEqual(r2.corregidos, []);
+  const tarde = await barrido(s, { now: en(T0, 24 * 3600 * 1000) }); assert.equal(tarde.cerrados.length, 3);
+  assert.deepEqual(ids.map(id => ra(s, id)), [false, true, false, true, false, true]);
+});
+
+test('backfill: planAtencion cuenta las raíces que cambian; aplicar con recalcularAtencion deja el plan vacío', async () => {
+  const raiz = (id, o) => ({ col: 'tablon_agentes', id, data: { id, hilo: id, es_raiz: true, autor: 'alfie', agente: 'alfie', tipo: 'duda', asunto: 'Asunto ' + id, texto: 'x', destinatarios: ['alfred'], prioridad: 'normal', estado: 'abierto', creado_en: '2026-11-20T10:00:00Z', ...o } });
+  const s = new Store([raiz('msg_a', { prioridad: 'urgente' }), raiz('msg_b', {}), raiz('msg_c', { prioridad: 'urgente', estado: 'resuelto' }), raiz('msg_d', { tipo: 'nota', prioridad: 'urgente', espera_a: 'Alfred', destinatarios: ['conchi'] }), raiz('msg_e', { prioridad: 'urgente', requiere_atencion: true }), { col: 'tablon_agentes', id: 'msg_r', data: { id: 'msg_r', hilo: 'msg_a', es_raiz: false, texto: 'resp', creado_en: '2026-11-20T11:00:00Z' } }]);
+  const rows = await s.list('tablon_agentes'), plan = planAtencion(rows);
+  assert.equal(plan.raices, 5); assert.equal(plan.aTrue, 3); assert.deepEqual(plan.cambios.map(c => c.id).sort(), ['msg_a', 'msg_b', 'msg_c', 'msg_d']);
+  assert.equal(plan.cambios.find(c => c.id === 'msg_e'), undefined, 'ya correcto');
+  const hecho = await recalcularAtencion(s); assert.equal(hecho.length, 4);
+  assert.deepEqual(['msg_a', 'msg_b', 'msg_c', 'msg_d', 'msg_e'].map(id => ra(s, id)), [true, false, false, true, true]);
+  assert.deepEqual(planAtencion(await s.list('tablon_agentes')).cambios, []); assert.equal((await recalcularAtencion(s)).length, 0);
+  assert.equal('requiere_atencion' in s.docs.get('tablon_agentes/msg_r').data, false);
 });

@@ -165,6 +165,12 @@ Pruebas reproducibles: `FIRESTORE_EMULATOR_HOST=127.0.0.1:8686 AMALIA_TEST_PUBLI
 - Municipio con alias (`Lumbier/Irunberri`, `Donostia`/`San Sebastián`…, tabla ampliable en `clave-sesion.mjs`); una clave por **día** en rangos `fechaLocal`–`fechaFinLocal` (hasta 31 días); el tipo de recinto (teatro, auditorio, museo, iglesia, plaza…) ya no se quita; fecha/hora de eventos antiguos desde `dateTime` en hora de Madrid.
 - `rellenar_claves.mjs`: lo que sobra se libera, no se borra.
 
+## 2.25.17 — requiere_atencion guardado en Firestore (SIGUE EN SOMBRA)
+
+- Campo booleano **`requiere_atencion`** en el documento **raíz** de cada hilo de la colección **`tablon_agentes`** (las respuestas no lo llevan). Valor = abierto && urgente && (tipo duda, ayuda o cambio_zona, o con `espera_a`).
+- Se escribe al publicar y al cerrar (resolver, decidir, autocierre) y se recalcula tras responder, decidir, `marcar_leido` y en el barrido de 5 min (`barrido`: autocierre + recálculo de todas las raíces). Solo se reescribe la raíz si el valor guardado difiere.
+- `backfill_requiere_atencion.mjs` (dry-run por defecto; `--aplicar --confirmo <huella>`) rellena los hilos existentes.
+
 ## 2.25.16 — tablón: autocierre, límite y requiereAtencion (SIGUE EN SOMBRA)
 
 - **Autocierre en servidor** (`autocerrar`, en `tablon.mjs`): los hilos aviso, nota y asignacion abiertos se cierran solos (`resuelto_por: "sistema"`, `nota: "autocierre"`, `autocierre_motivo`: `leido_por_todos` | `seis_horas`) cuando todos sus destinatarios los han leído (marca de lectura posterior al último mensaje de otros; «todos» = todos los agentes; el autor no cuenta) o a las 6 h de creados. duda, ayuda, cambio_zona (y evento, decision, respuesta) nunca se autocierran. Se aplica al listar, en `mis_pendientes` y `marcar_leido`, y con un barrido cada 5 min (`AMALIA_AUTOCIERRE_MS`, 0 lo desactiva). Primer barrido: unos 14 hilos antiguos abiertos se cerrarán.
