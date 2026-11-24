@@ -165,6 +165,14 @@ Pruebas reproducibles: `FIRESTORE_EMULATOR_HOST=127.0.0.1:8686 AMALIA_TEST_PUBLI
 - Municipio con alias (`Lumbier/Irunberri`, `Donostia`/`San Sebastián`…, tabla ampliable en `clave-sesion.mjs`); una clave por **día** en rangos `fechaLocal`–`fechaFinLocal` (hasta 31 días); el tipo de recinto (teatro, auditorio, museo, iglesia, plaza…) ya no se quita; fecha/hora de eventos antiguos desde `dateTime` en hora de Madrid.
 - `rellenar_claves.mjs`: lo que sobra se libera, no se borra.
 
+## 2.25.9 — admisión sin escanear el catálogo (SIGUE EN SOMBRA)
+
+- **Causa:** `preparar_admision`/`admitir_candidato` leían los ~5.000 eventos para comparar y, al superar el tope, daban `incomplete_scan` / `catalog_limit_exceeded`.
+- **Ahora** (`EventService.candidateUniverse`): la guardia se lee primero y solo se consultan los candidatos posibles: eventos con fecha de sesión entre -1 y +1 día de cada sesión del candidato (consultas por rango sobre `fechaLocal`, `fecha_inicio` y `dateTime`, que cubren documentos canónicos y legacy), sin los pasados (la ventana empieza hoy), y limitados al mismo municipio (con alias) o a la misma provincia; más lecturas puntuales de la identidad calculada y de la reserva de origen. Los documentos sin municipio se conservan (fail-closed).
+- El tope de 5.000 desaparece del camino de admisión y de las ediciones con escaneo. `buscar_duplicados_global` y la admisión de programas siguen recorriendo todo el catálogo, con tope de seguridad `AMALIA_UNIVERSE_MAX_DOCS` (100.000 por defecto).
+- **Índices** (`firestore.indexes.json`): solo campos únicos (`fechaLocal`, `fecha_inicio`, `dateTime`), que Firestore crea por defecto; no hace falta ningún índice compuesto. Despliegue opcional: `firebase deploy --only firestore:indexes`.
+- Tests: `tests/admision-indexada.test.mjs` (catálogo de 5.200 eventos donde listar `eventos` está prohibido).
+
 ## 2.25.8 — agente Noodle (SIGUE EN SOMBRA)
 
 - Nuevo agente `noodle` (mismos permisos que Conchi): reconocido en `AGENTES` y `AGENTES_CONOCIDOS`, aparece en `resumen_tareas`.

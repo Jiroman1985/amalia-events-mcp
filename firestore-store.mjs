@@ -57,6 +57,22 @@ export class FirestoreStore {
     if(!Array.isArray(rows))fail('incomplete_scan');
     return rows.filter(r=>r.document).map(r=>({id:r.document.name.split('/').at(-1),data:decodeFields(r.document.fields),updateTime:r.document.updateTime}));
   }
+  // Documentos cuyo campo de texto `campo` está en [desde, hasta] (índice de campo único, automático en Firestore). Pagina de 500 en 500 por (campo, id) hasta agotar; nunca recorre la colección.
+  async queryRango(collection,campo,desde,hasta,{max=20000}={}) {
+    if(!/^[A-Za-z_][A-Za-z0-9_]*$/.test(campo))fail('invalid_field',{campo});
+    const out=[],f=(op,v)=>({fieldFilter:{field:{fieldPath:campo},op,value:{stringValue:v}}});
+    let after=null;
+    for(;;){
+      const query={from:[{collectionId:collection}],where:{compositeFilter:{op:'AND',filters:[f('GREATER_THAN_OR_EQUAL',desde),f('LESS_THAN_OR_EQUAL',hasta)]}},orderBy:[{field:{fieldPath:campo},direction:'ASCENDING'},{field:{fieldPath:'__name__'},direction:'ASCENDING'}],limit:500};
+      if(after)query.startAt={values:[{stringValue:after.valor},{referenceValue:`${this.prefix}/${collection}/${id(after.id)}`}],before:false};
+      const rows=await this.request(':runQuery',{method:'POST',body:JSON.stringify({structuredQuery:query})});
+      if(!Array.isArray(rows))fail('incomplete_scan');
+      const page=rows.filter(r=>r.document).map(r=>({id:r.document.name.split('/').at(-1),data:decodeFields(r.document.fields),updateTime:r.document.updateTime}));
+      out.push(...page);if(out.length>max)fail('incomplete_scan',{ayuda:'La ventana de fechas devuelve demasiados documentos.'});
+      if(page.length<500)return out;
+      const last=page.at(-1);after={valor:last.data[campo],id:last.id};
+    }
+  }
   // Lee una colección entera en paralelo: primero solo los ids (barato) y luego tramos acotados por id (startAt/endAt) para que no queden huecos aunque entren documentos mientras tanto.
   async listAll(collection,{max=Infinity,step=250,concurrency=2}={}) {
     const ids=[];let cursor=null;

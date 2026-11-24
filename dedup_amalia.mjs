@@ -120,6 +120,15 @@ export function motivoSesion(candidato,row) {
  const dFecha=leg(d,'fechaLocal','fecha_inicio')||d.dateTime?.slice(0,10)||null;
  return !title?'sesion_coincidente':dTitulo===title?(candidato.fechaLocal&&dFecha&&dFecha!==candidato.fechaLocal?'sesion_conflicto_fecha':'misma_sesion'):'sesion_coincidente';
 }
+/** IDs de evento que produciría este candidato (forma legacy y canónica): permiten comprobar «identidad_calculada» con lecturas puntuales, sin recorrer el catálogo. */
+export function identidadesCalculadas(candidato) {
+ const urls=(candidato.fuentes||[]).map(s=>String(s.url)).filter(Boolean),sourceIds=(candidato.fuentes||[]).map(s=>s.sourceId).filter(Boolean).map(String);
+ const title=candidato.titulo?normalizeText(candidato.titulo):null,fecha=candidato.fechaLocal||null,sesion=candidato.sesionId||null;
+ if(!(candidato.negocioId&&(urls.length||sourceIds.length)&&(sesion||(fecha&&title))))return [];
+ const common={negocioId:candidato.negocioId,fuentes:[{url:urls[0]||'https://invalid.local/',sourceId:sourceIds[0]||null}],fechaLocal:fecha||'',titulo:candidato.titulo||''};
+ const candidates=[{...common,sesionId:sesion||`${fecha}/`,sesionExplicita:!!sesion,horaLocal:null},{...common,sesionId:sesion||`${fecha}/sin-hora`,sesionExplicita:candidato.sesionExplicita ?? !!sesion,horaLocal:candidato.horaLocal||null}];
+ return [...new Set(candidates.map(eventIdentity))];
+}
 export function escanearDuplicados(candidato, docs, {limite=5000, reservas=[]}={}) {
  const urls=(candidato.fuentes||[]).map(s=>String(s.url)).filter(Boolean);
  const sourceIds=(candidato.fuentes||[]).map(s=>s.sourceId).filter(Boolean).map(String);
@@ -128,12 +137,7 @@ export function escanearDuplicados(candidato, docs, {limite=5000, reservas=[]}={
  const found=new Map();
  const add=(r,motivo)=>{const cur=found.get(r.eventId||r.id)||{row:r,motivos:[]};if(!cur.motivos.includes(motivo))cur.motivos.push(motivo);found.set(r.eventId||r.id,cur);};
  if(candidato.origen){const k=originKey(candidato.origen);const held=reservas.find(rv=>(rv.id||rv.reservaId)===k);if(held){const ev=docs.find(d=>(d.eventId||d.id)===held.eventId);if(ev)add(ev,'reserva_origen_exacta');}}
- if(candidato.negocioId&&(urls.length||sourceIds.length)&&(sesion||(fecha&&title))){
-  const common={negocioId:candidato.negocioId,fuentes:[{url:urls[0]||'https://invalid.local/',sourceId:sourceIds[0]||null}],fechaLocal:fecha||'',titulo:candidato.titulo||''};
-  // Conservar detección de identidades legacy y añadir la forma canónica vigente.
-  const candidates=[{...common,sesionId:sesion||`${fecha}/`,sesionExplicita:!!sesion,horaLocal:null},{...common,sesionId:sesion||`${fecha}/sin-hora`,sesionExplicita:candidato.sesionExplicita ?? !!sesion,horaLocal:candidato.horaLocal||null}];
-  for(const guessed of new Set(candidates.map(eventIdentity))){const hit=docs.find(d=>(d.eventId||d.id)===guessed);if(hit)add(hit,'identidad_calculada');}
- }
+ for(const guessed of identidadesCalculadas(candidato)){const hit=docs.find(d=>(d.eventId||d.id)===guessed);if(hit)add(hit,'identidad_calculada');}
  let escaneados=0,exhaustivo=true;
  for(const r of docs){
   if(escaneados>=limite){exhaustivo=false;break;}

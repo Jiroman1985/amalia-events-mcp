@@ -2,7 +2,7 @@ import {clavesDeEvento,claveSesion,decidirSesion,normalizarUrl,sesionesDeEvento,
 import {encolarRevision,resumenCola} from './cola-revision.mjs';
 import {splitProvenance,prepareProvenance,provenanceProposal,assertReplayProvenance,registryCapabilities} from './registro-provenance.mjs';
 import {ProgramAdmission} from './program-admission.mjs';
-import { claveNombre, escanearDuplicados, informativaPorFuente, motivoSesion, horarioImplicitoDistinto, municipioDistintoAviso, reglaDuplicado, clasificarCoincidencias } from './dedup_amalia.mjs';
+import { claveNombre, identidadesCalculadas, escanearDuplicados, informativaPorFuente, motivoSesion, horarioImplicitoDistinto, municipioDistintoAviso, reglaDuplicado, clasificarCoincidencias } from './dedup_amalia.mjs';
 import { randomUUID } from 'node:crypto';
 import { agenteCanonico } from './identidad.mjs';
 import { normSesiones,conPlazo,DomainError,assertFuentePrimaria,mergeSources,tituloSoloForma,canonicalInputExtras,canonicalInput,eventIdentity,fingerprint,record,authorize,authorizeCapture,id,fail,hash,originKey,normalizeText } from './event-domain.mjs';
@@ -12,6 +12,8 @@ const extrasCandidato=input=>{const {etiquetas,direccion,fuente_nombre,fuente_ti
 const leg=(d,k,...alt)=>{for(const key of [k,...alt]){if(d[key]!=null)return d[key];}return null;};
 const LOTE_PRESUPUESTO_MS=Number(process.env.AMALIA_LOTE_PRESUPUESTO_MS||38000);
 const UNIVERSE_LOAD_MS=Number(process.env.AMALIA_UNIVERSE_LOAD_MS||40000);
+// Tope de seguridad SOLO para las herramientas que recorren todo el catálogo (buscar_duplicados_global, programas); la admisión ya no lo usa.
+const UNIVERSE_MAX_DOCS=Number(process.env.AMALIA_UNIVERSE_MAX_DOCS||100000);
 const UNIVERSE_TTL_MS=Number(process.env.AMALIA_UNIVERSE_TTL_MS||600000);
 export class EventService {
  constructor(store,media,options={}) {this.clavesModo=options.claves??process.env.AMALIA_CLAVES??'off';this.store=store;this.media=media;this.programs=options.programs||new ProgramAdmission(store);this.inflight=new Map();this.outcomes=new Map();this.registryOptions={cutoff:options.registryCutoff??process.env.AMALIA_FUENTES_V2_DESDE_ISO,now:options.now};if(typeof store.listAll==='function'&&options.warm!==false&&this.clavesModo!=='bloquea'){const write=store.write.bind(store);store.write=async(...a)=>{const r=await write(...a);if(a[0]==='eventos'){const patched=await this.patchUniverse(a,r).catch(()=>false);if(!patched)setTimeout(()=>this.warm(),0);}return r;};setTimeout(()=>this.warm(),0);}}
@@ -30,7 +32,8 @@ export class EventService {
   this.universeCache={updateTime:result.updateTime,at:c.at,docs,reservas};
   return true;
  }
- warm(){if(this.warming)return;this.warming=this.catalogUniverse().catch(()=>{}).finally(()=>{this.warming=null;});}
+ // La admisión ya no necesita precargar el catálogo: consulta solo los candidatos de cada alta.
+ warm(){}
  async registryContext(raw,event,principal){return prepareProvenance(this.store,raw,event,principal,{cutoff:this.registryOptions.cutoff,...(this.registryOptions.now?{now:this.registryOptions.now()}: {})});}
  async registryCapabilities(input,principal){return registryCapabilities(this.store,principal,input.fuenteId,this.registryOptions.cutoff);}
  // Recibo por requestId (con o sin negocioId). Si el alta sigue ejecutándose devuelve estado «en_proceso» en vez de un vacío.
@@ -107,6 +110,44 @@ export class EventService {
   }
   return canon;
  }
+ /**
+  * Universo ACOTADO para comprobar duplicados de UN candidato: no lee el catálogo. Consulta (índice de campo único) los eventos con fecha de sesión
+  * entre -1 y +1 día de cada sesión del candidato, sin los ya pasados, y los limita al mismo municipio o provincia; además lecturas puntuales
+  * de la identidad calculada y de la reserva de origen. La guardia se lee ANTES de las consultas: si alguien escribe después, el commit falla por contienda.
+  * Cubre documentos canónicos (fechaLocal), legacy (fecha_inicio) y los que solo traen dateTime ISO.
+  */
+ async candidateUniverse(e,{requireOpen=false}={}) {
+  const guard=await this.catalogGuard({requireOpen});
+  await this.cargarAlias();
+  const hoy=new Date().toLocaleDateString('sv-SE',{timeZone:'Europe/Madrid'});
+  const dia=(f,n)=>{const t=new Date(f+'T00:00:00Z');t.setUTCDate(t.getUTCDate()+n);return t.toISOString().slice(0,10);};
+  const fechas=[...new Set([e.fechaLocal,...(Array.isArray(e.sesiones)?e.sesiones.map(s=>s.fechaLocal):[])].filter(f=>/^\d{4}-\d{2}-\d{2}$/.test(f||'')))].sort();
+  const ventanas=[];
+  for(const f of fechas){const lo=dia(f,-1)<hoy?hoy:dia(f,-1),hi=dia(f,1);if(hi<hoy)continue;const ult=ventanas.at(-1);if(ult&&lo<=dia(ult.hi,1))ult.hi=hi>ult.hi?hi:ult.hi;else ventanas.push({lo,hi});}
+  const porId=new Map(),add=r=>{if(r?.id&&!porId.has(r.id))porId.set(r.id,r);};
+  const rango=async(campo,lo,hi)=>typeof this.store.queryRango==='function'?this.store.queryRango('eventos',campo,lo,hi):this.#rangoEnMemoria(campo,lo,hi);
+  for(const v of ventanas){
+   const [a,b,c]=await Promise.all([rango('fechaLocal',v.lo,v.hi),rango('fecha_inicio',v.lo,v.hi),rango('dateTime',v.lo,v.hi+'\uffff')]);
+   for(const r of [...a,...b,...c])add(r);
+  }
+  for(const id of identidadesCalculadas(e))add(await this.store.get('eventos',id));
+  const reservas=[];
+  if(e.origen){
+   const held=await this.store.get('amalia_event_reservations',originKey(e.origen));
+   if(held&&held.data.estado!=='liberada'){reservas.push({...held.data,id:held.id});if(held.data.eventId)add(await this.store.get('eventos',held.data.eventId));}
+  }
+  const muni=municipioClave(e.city||''),prov=claveNombre(e.provincia||'');
+  const mismoLugar=r=>{const d=r.data||{},c=leg(d,'city','ciudad')||(typeof d.ubicacion==='string'?d.ubicacion:d.ubicacion?.municipio),p=claveNombre(d.provincia||(d.ubicacion&&d.ubicacion.provincia)||'');
+   if(!muni||!c)return true;if(municipioClave(c)===muni)return true;return !!(prov&&p&&p===prov);};
+  const idsFijos=new Set([...identidadesCalculadas(e),...reservas.map(r=>r.eventId)]);
+  const docs=[...porId.values()].filter(r=>idsFijos.has(r.id)||mismoLugar(r));
+  return {guard,docs,reservas};
+ }
+ // Almacenes sin consulta por rango (dobles de prueba): se recorre por páginas, sin tope, y se filtra en memoria con el mismo criterio.
+ async #rangoEnMemoria(campo,lo,hi) {
+  const out=[];let cursor=null;
+  for(;;){const page=await this.store.list('eventos',{cursor,limit:500});if(!Array.isArray(page))fail('incomplete_scan');for(const r of page){const v=r.data?.[campo];if(typeof v==='string'&&v>=lo&&v<=hi)out.push(r);}if(page.length<500)return out;cursor=page.at(-1).id;}
+ }
  async catalogUniverse({requireOpen=false}={}) {
   const guard=await this.store.get('amalia_catalog_guard','eventos');
   if(!guard?.updateTime || !Number.isSafeInteger(guard.data.epoch) || guard.data.epoch<0 || guard.data.epoch>=Number.MAX_SAFE_INTEGER)fail('catalog_guard_unavailable');
@@ -133,7 +174,7 @@ export class EventService {
   }
   this.universeCache=null;
   const loadAll=async(collection,limit)=>typeof this.store.listAll==='function'?this.store.listAll(collection,{max:limit}):readAll(collection,limit);
-  const promise=conPlazo((async()=>({docs:await loadAll('eventos',5000),reservas:(await loadAll('amalia_event_reservations')).filter(r=>r.data.estado!=='liberada').map(r=>({...r.data,id:r.id}))}))(),UNIVERSE_LOAD_MS,'catalog_load_timeout',{ayuda:'La lectura del catálogo tardó demasiado y se abandonó; reintenta en unos segundos.'});
+  const promise=conPlazo((async()=>({docs:await loadAll('eventos',UNIVERSE_MAX_DOCS),reservas:(await loadAll('amalia_event_reservations')).filter(r=>r.data.estado!=='liberada').map(r=>({...r.data,id:r.id}))}))(),UNIVERSE_LOAD_MS,'catalog_load_timeout',{ayuda:'La lectura del catálogo tardó demasiado y se abandonó; reintenta en unos segundos.'});
   this.universeLoading={updateTime:guard.updateTime,promise};
   try{const u=await promise;this.universeCache={updateTime:guard.updateTime,at:Date.now(),...u};return {guard,...u};}
   finally{if(this.universeLoading?.promise===promise)this.universeLoading=null;}
@@ -153,7 +194,7 @@ export class EventService {
  scanAdmission(e,universe,confirmar=null) {
   // Test fixtures (prueba:true) never reach the map: they only count as duplicates for other test fixtures, so a trial run cannot block the real event.
   const docs=e.prueba===true?universe.docs:universe.docs.filter(r=>(r.data||r).prueba!==true);
-  let scan=escanearDuplicados(e,docs,{limite:5000,reservas:universe.reservas});
+  let scan=escanearDuplicados(e,docs,{limite:Infinity,reservas:universe.reservas});
   // A reservation remains authoritative after its event has been purged.
   if(e.origen){const held=universe.reservas.find(r=>r.id===originKey(e.origen));if(held&&!universe.docs.some(r=>r.id===held.eventId))scan.coincidencias.push({eventId:held.eventId||null,motivos:['reserva_huerfana'],confianza:'exacta'});}
   if(!scan.exhaustivo)fail('incomplete_scan');
@@ -259,7 +300,7 @@ export class EventService {
    const guard=await this.catalogGuard({requireOpen});
    return {guard,scan:await this.scanPorClaves(e)};
   }
-  const universe=await this.catalogUniverse({requireOpen}),scan=this.scanFicha(e,universe,input.confirmarOtraSesion);
+  const universe=await this.candidateUniverse(e,{requireOpen}),scan=this.scanFicha(e,universe,input.confirmarOtraSesion);
   if(this.clavesModo==='sombra'){
    try{const sombra=await this.scanPorClaves(e);scan.clavesSombra={decision:sombra.claves.decision,coincidencias:sombra.coincidencias};console.log(JSON.stringify({event:'claves_sombra',eventId:eventIdentity(e),actual:scan.coincidencias.length?'bloquea':'libre',claves:sombra.claves.decision,coincidenciasClaves:sombra.coincidencias.map(c=>c.eventId)}));}catch(err){console.error(JSON.stringify({event:'claves_sombra_error',error:err?.code||'error'}));}
   }
@@ -553,7 +594,7 @@ export class EventService {
    const candidates=[{...common,sesionId:supplied||`${fecha}/`,sesionExplicita:!!supplied,horaLocal:null},{...common,sesionId:sesion||`${fecha}/sin-hora`,sesionExplicita,horaLocal:input.horaLocal||null}];
    for(const guessed of new Set(candidates.map(eventIdentity))){const hit=await this.store.get('eventos',guessed);if(hit)add(hit,'identidad_calculada');}
   }
-  const limite=Math.min(Math.max(input.limite||5000,100),5000);
+  const limite=Math.min(Math.max(input.limite||UNIVERSE_MAX_DOCS,100),UNIVERSE_MAX_DOCS);
   const traza=randomUUID(),inicio=new Date().toISOString(),base=[...found].map(([k,v])=>[k,{row:v.row,motivos:[...v.motivos]}]);
   const candRegla={titulo:input.titulo||null,city:input.city||null,lugar:input.lugar||null,fechaLocal:fecha,horaLocal:input.horaLocal||null};
   const guardUpdate=async()=>{try{return (await this.store.get('amalia_catalog_guard','eventos'))?.updateTime||null;}catch{return null;}};
@@ -691,7 +732,7 @@ export class EventService {
      if(scan.coincidencias.length)fail('duplicate_event_conflict',{coincidencias:scan.coincidencias,revision:true});
      guard={updateTime:(await this.catalogGuard()).updateTime};
     }else{
-     const universe=await this.catalogUniverse(),scan=this.scanAdmission(e,{...universe,docs:universe.docs.filter(r=>r.id!==eventId),reservas:universe.reservas.filter(r=>r.eventId!==eventId)});
+     const universe=await this.candidateUniverse(e),scan=this.scanAdmission(e,{...universe,docs:universe.docs.filter(r=>r.id!==eventId),reservas:universe.reservas.filter(r=>r.eventId!==eventId)});
      if(scan.coincidencias.length)fail('duplicate_event_conflict',{coincidencias:scan.coincidencias,revision:true});
      guard={updateTime:universe.guard.updateTime};
     }

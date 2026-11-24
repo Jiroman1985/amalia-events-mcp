@@ -1,0 +1,8 @@
+{
+  "indexes": [],
+  "fieldOverrides": [
+    { "collectionGroup": "eventos", "fieldPath": "fechaLocal", "indexes": [{ "order": "ASCENDING", "queryScope": "COLLECTION" }, { "order": "DESCENDING", "queryScope": "COLLECTION" }] },
+    { "collectionGroup": "eventos", "fieldPath": "fecha_inicio", "indexes": [{ "order": "ASCENDING", "queryScope": "COLLECTION" }, { "order": "DESCENDING", "queryScope": "COLLECTION" }] },
+    { "collectionGroup": "eventos", "fieldPath": "dateTime", "indexes": [{ "order": "ASCENDING", "queryScope": "COLLECTION" }, { "order": "DESCENDING", "queryScope": "COLLECTION" }] }
+  ]
+}
