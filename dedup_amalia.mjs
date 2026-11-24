@@ -149,10 +149,14 @@ export function escanearDuplicados(candidato, docs, {limite=5000, reservas=[]}={
   const otraSesion=(fecha&&dFecha&&dFecha!==fecha)||(candidato.sesionExplicita!==false&&sesion&&d.sesionId&&d.sesionId!==sesion);
   if(urls.length&&dUrls.some(u=>urls.includes(u))){
    add(r,otraSesion?'url_fuente_otra_sesion':'url_fuente');
-   // Misma URL de origen y mismo título normalizado: es el mismo evento (p. ej. reingresado con la fecha mal leída). Bloquea; solo la URL, no.
+   // Misma URL de origen y mismo título normalizado en el mismo municipio y a ≤1 día (o sin fecha): es el mismo evento. Bloquea; solo la URL, o otro municipio/día, es aviso.
    // Excepciones: el candidato es una sesión declarada de un evento por sesiones (temporalidad.tipo='sesiones'), o ambos declaran un sesionId EXPLÍCITO y distinto (fichas de varias sesiones del mismo evento, cada una con su identificador propio).
    const sesionesDistintas=candidato.temporalidadTipo==='sesiones'||candidato.sesionExplicita===true&&d.sesionExplicita===true&&sesion&&d.sesionId&&d.sesionId!==sesion;
-   if(!sesionesDistintas&&claveNombre(candidato.titulo)&&claveNombre(candidato.titulo)===claveNombre(leg(d,'titulo','nombre')))add(r,'url_titulo');
+   // Bloquea solo si además es el mismo municipio y la fecha dista ≤1 día, o si uno de los dos no tiene fecha. Giras (otro municipio) y ciclos semanales (otro día) son aviso.
+   const mismoMunicipio=!city||!dCity||claveNombre(candidato.city)===claveNombre(leg(d,'city','ciudad')||(typeof d.ubicacion==='string'?d.ubicacion:d.ubicacion?.municipio)),
+    dias=fecha&&dFecha?Math.abs(Date.parse(fecha+'T00:00:00Z')-Date.parse(dFecha+'T00:00:00Z'))/86400000:null,
+    sinFecha=!fecha||!dFecha||!Number.isFinite(dias);
+   if(!sesionesDistintas&&claveNombre(candidato.titulo)&&claveNombre(candidato.titulo)===claveNombre(leg(d,'titulo','nombre'))&&(sinFecha||(mismoMunicipio&&dias<=1)))add(r,'url_titulo');
   }
   if(sourceIds.length&&dSourceIds.some(s=>sourceIds.includes(s)))add(r,otraSesion?'source_id_otra_sesion':'source_id');
   const cityConflict=city&&dCity&&dCity!==city;

@@ -138,18 +138,32 @@ test('listar_altas_recientes: filtros por autor/provincia, paginación con curso
 });
 
 // ---- misma URL de origen fuera de la ventana ----
-test('preparar_admision: reingreso con la fecha mal leída (fuera de ±1 día) se detecta por la misma URL de origen', async () => {
+test('preparar_admision: la misma URL de origen fuera de la ventana de ±1 día se recupera como aviso; dentro de ella con el mismo título bloquea', async () => {
   const { store, events } = await banco(5200);
   const orig = await events.create(nuevo({ titulo: 'Fiesta de la vendimia', fechaLocal: '2099-03-01', fuentes: [{ url: 'https://agenda.es/vendimia', checkedAt: '2026-11-01T10:00:00.000Z' }] }), owner);
   store.leidos = 0;
   const p = await events.prepareAdmission(nuevo({ titulo: 'Fiesta de la vendimia', fechaLocal: '2099-09-09', fuentes: [{ url: 'https://agenda.es/vendimia', checkedAt: '2026-11-01T10:00:00.000Z' }] }), owner);
   const leidosPrimera = store.leidos;
   const hit = p.coincidencias.concat(p.informativas).find(c => c.eventId === orig.eventId);
-  assert.ok(hit, 'la misma URL fuera de la ventana se recupera'); assert.ok(hit.motivos.includes('url_titulo'));
-  assert.equal(p.admisible, false, 'misma URL y mismo título: bloquea');
+  assert.ok(hit, 'la misma URL fuera de la ventana se recupera'); assert.ok(hit.motivos.includes('url_fuente_otra_sesion'));
+  assert.equal(p.admisible, true, 'misma URL y título pero a meses de distancia: aviso, no bloqueo');
+  const cerca = await events.prepareAdmission(nuevo({ titulo: 'Fiesta de la vendimia', fechaLocal: '2099-03-02', fuentes: [{ url: 'https://agenda.es/vendimia', checkedAt: '2026-11-01T10:00:00.000Z' }] }), owner);
+  assert.equal(cerca.admisible, false); assert.ok(cerca.coincidencias.some(c => c.eventId === orig.eventId && c.motivos.includes('url_titulo')));
   const soloUrl = await events.prepareAdmission(nuevo({ titulo: 'Concierto de clausura', fechaLocal: '2099-09-09', fuentes: [{ url: 'https://agenda.es/vendimia', checkedAt: '2026-11-01T10:00:00.000Z' }] }), owner);
   assert.equal(soloUrl.admisible, true, 'solo la URL: aviso'); assert.ok(soloUrl.informativas.some(c => c.eventId === orig.eventId && c.motivos.includes('url_fuente_otra_sesion')));
   assert.ok(leidosPrimera < 100, 'lectura indexada, sin escaneo: ' + leidosPrimera);
   const otra = await events.prepareAdmission(nuevo({ titulo: 'Otra cosa', fechaLocal: '2099-09-09', fuentes: [{ url: 'https://agenda.es/otra', checkedAt: '2026-11-01T10:00:00.000Z' }] }), owner);
   assert.equal(otra.informativas.concat(otra.coincidencias).some(c => c.eventId === orig.eventId), false);
+});
+
+test('gira con la misma URL y título en municipios distintos: se admiten las tres paradas, con aviso', async () => {
+  const { events } = await banco(5200);
+  const url = 'https://duendenazari.es/zambomba', titulo = 'Zambomba flamenca navideña con Duende Nazarí';
+  const parada = (city, fechaLocal) => nuevo({ titulo, city, fechaLocal, horaLocal: '20:00', fuentes: [{ url, checkedAt: '2026-11-01T10:00:00.000Z' }] });
+  const a = await events.create(parada('Gorafe', '2099-12-18'), owner), b = await events.create(parada('Játar', '2099-12-19'), owner);
+  const p = await events.prepareAdmission(parada('Ventas de Huelma', '2099-12-20'), owner);
+  assert.equal(p.admisible, true); assert.deepEqual(p.coincidencias, []);
+  assert.deepEqual(p.informativas.map(x => x.eventId).sort(), [a.eventId, b.eventId].sort());
+  const repetida = await events.prepareAdmission(parada('Játar', '2099-12-20'), owner);
+  assert.equal(repetida.admisible, false); assert.ok(repetida.coincidencias.some(c => c.eventId === b.eventId && c.motivos.includes('url_titulo')));
 });

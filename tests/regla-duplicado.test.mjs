@@ -143,11 +143,31 @@ test('Noja: la hora definida se compara como hora local (zona Europe/Madrid): 16
   assert.deepEqual(escanearDuplicados({ ...nojaNuevo, horaLocal: '15:30' }, [nojaPrevio]).coincidencias, []);
 });
 
-test('misma URL de origen y mismo título normalizado: bloquea aunque la fecha, la hora o el lugar sean otros', () => {
-  for (const o of [{ fechaLocal: '2026-12-06' }, { fechaLocal: '2027-03-01' }, { horaLocal: '21:00' }, { city: 'Vigo' }, { titulo: '  MOI, ánimal ' }]) {
+test('misma URL y mismo título normalizado en el mismo municipio a ≤1 día: bloquea', () => {
+  for (const o of [{}, { fechaLocal: '2026-12-06' }, { fechaLocal: '2026-12-04' }, { horaLocal: '21:00' }, { lugar: 'Auditorio Municipal' }, { titulo: '  MOI, ánimal ' }]) {
     const r = escanearDuplicados(cand(o), [prev()]);
     assert.deepEqual(ids(r), ['ev_moi'], JSON.stringify(o)); assert.ok(r.coincidencias[0].motivos.includes('url_titulo'));
   }
+});
+
+test('misma URL y título pero sin fecha en uno de los dos: bloquea', () => {
+  assert.deepEqual(ids(escanearDuplicados(cand({ fechaLocal: null }), [prev()])), ['ev_moi']);
+  assert.deepEqual(ids(escanearDuplicados(cand({ city: 'Vigo' }), [{ id: 'ev_sinfecha', data: { titulo: 'Moi Animal', city: 'Ourense', fuentes: [{ url: 'https://teatro.example/moi' }] } }])), ['ev_sinfecha']);
+});
+
+test('giras y ciclos semanales con la misma URL y título: aviso, no bloqueo (Zambomba flamenca de Duende Nazarí)', () => {
+  const url = 'https://duendenazari.example/zambomba', titulo = 'Zambomba flamenca navideña con Duende Nazarí';
+  const gira = [['Gorafe', '2026-12-18'], ['Játar', '2026-12-19'], ['Ventas de Huelma', '2026-12-20']].map(([city, fechaLocal], i) => ({ id: 'ev_gira' + i, data: { titulo, city, fechaLocal, horaLocal: '20:00', fuentes: [{ url }] } }));
+  const c = escanearDuplicados({ negocioId: 'b1', titulo, city: 'Játar', fechaLocal: '2026-12-19', horaLocal: '21:30', fuentes: [{ url }] }, [gira[0], gira[2]]);
+  assert.deepEqual(c.coincidencias, []); assert.deepEqual(c.informativas.map(x => x.eventId).sort(), ['ev_gira0', 'ev_gira2']);
+  assert.ok(c.informativas.every(x => x.motivos.includes('url_fuente_otra_sesion')));
+  // La misma sesión de la gira (mismo municipio y día) sigue bloqueando
+  assert.deepEqual(ids(escanearDuplicados({ negocioId: 'b1', titulo, city: 'Játar', fechaLocal: '2026-12-19', horaLocal: '20:00', fuentes: [{ url }] }, gira)), ['ev_gira1']);
+  // Ciclo semanal en el mismo municipio: otro día (7 días) = aviso
+  const semanal = escanearDuplicados(cand({ fechaLocal: '2026-12-12' }), [prev()]);
+  assert.deepEqual(semanal.coincidencias, []); assert.ok(semanal.informativas.some(x => x.eventId === 'ev_moi'));
+  // Otro municipio el mismo día: aviso
+  assert.deepEqual(escanearDuplicados(cand({ city: 'Vigo' }), [prev()]).coincidencias, []);
 });
 
 test('solo la misma URL (título distinto): sigue siendo un aviso, no bloquea', () => {

@@ -165,6 +165,11 @@ Pruebas reproducibles: `FIRESTORE_EMULATOR_HOST=127.0.0.1:8686 AMALIA_TEST_PUBLI
 - Municipio con alias (`Lumbier/Irunberri`, `Donostia`/`San Sebastián`…, tabla ampliable en `clave-sesion.mjs`); una clave por **día** en rangos `fechaLocal`–`fechaFinLocal` (hasta 31 días); el tipo de recinto (teatro, auditorio, museo, iglesia, plaza…) ya no se quita; fecha/hora de eventos antiguos desde `dateTime` en hora de Madrid.
 - `rellenar_claves.mjs`: lo que sobra se libera, no se borra.
 
+## 2.25.12 — url_titulo más preciso (SIGUE EN SOMBRA)
+
+- `url_titulo` (misma URL de origen + mismo título normalizado) solo **bloquea** si además es el mismo municipio y la fecha dista ≤1 día, o si uno de los dos no tiene fecha. Con otro municipio u otro día es aviso (`url_fuente_otra_sesion`): giras (p. ej. «Zambomba flamenca navideña con Duende Nazarí» en Gorafe, Játar y Ventas de Huelma) y ciclos semanales comparten URL y título. Sigue exento un evento por sesiones o con `sesionId` explícito distinto en ambos.
+- Backfill aplicado en parte (2.671 de 2.771 eventos); quedan 100 pendientes de aprobación.
+
 ## 2.25.11 — URL de origen + título bloquea; backfill más estricto (SIGUE EN SOMBRA)
 
 - **Bloqueo por URL + título:** si el candidato comparte URL de origen Y título normalizado (`claveNombre`: sin tildes, mayúsculas ni signos) con un evento existente, la coincidencia es bloqueante (`url_titulo`) aunque la fecha, la hora o el lugar sean otros. Solo la URL sigue siendo aviso (`url_fuente_otra_sesion`). Excepciones: el candidato es una sesión de un evento por sesiones (`temporalidad.tipo='sesiones'`) o ambos declaran un `sesionId` explícito distinto. Salida legítima para otra sesión de la misma página: `confirmarOtraSesion` (sesionId explícito + evidenciaUrl) en modo legacy; en modo `bloquea` decide Alfred por la cola.
