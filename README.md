@@ -79,6 +79,7 @@ Pruebas reproducibles: `FIRESTORE_EMULATOR_HOST=127.0.0.1:8686 AMALIA_TEST_PUBLI
 - Corrección: antes, con sesionId explícito, las N sesiones compartían eventId y solo se guardaba la primera.
 
 ## 2.24.0
+- **2.25.21**: el corte del registro de fuentes (`AMALIA_FUENTES_V2_DESDE_ISO`) tiene valor por defecto `2026-11-22T00:00:00Z` con aviso en el log si falta (antes `preparar_admision` con `procedenciaRegistro` fallaba con `registro_cutoff_unconfigured`); `capacidades_registro_fuentes` devuelve `cutoffPorDefecto`. En producción la variable está definida explícitamente.
 - **Rendimiento**: plazo interno de 55 s por herramienta (`operation_timeout`, antes de que nginx corte a los 75 s), lectura del catálogo con plazo de 40 s (`catalog_load_timeout`; una carga colgada ya no bloquea las siguientes llamadas) y el registro de fuentes se lee en paralelo y se reutiliza 15 s (se invalida con cualquier escritura propia).
 - **Varias sesiones en una llamada** (`temporalidad.tipo="sesiones"`, hasta 60): `preparar_admision` comprueba duplicados sesión a sesión y devuelve un hash; `admitir_candidato` crea las admisibles, omite las bloqueadas (con motivo) y es idempotente (reintentos seguros, presupuesto de tiempo con pendientes).
 - **Identidad canónica en eventos**: `updatedBy`, `retiradoPor`, `recuperadoPor` y `actor` de la auditoría se guardan como agente canónico y el principal original en `*Principal`. `createdBy` no cambia. Migración de los eventos existentes en `migrar_identidades.mjs` (ensayo por defecto).

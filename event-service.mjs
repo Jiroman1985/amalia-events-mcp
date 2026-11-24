@@ -1,6 +1,6 @@
 import {clavesDeEvento,claveSesion,decidirSesion,normalizarUrl,sesionesDeEvento,setAliasDinamico,municipioClave} from './clave-sesion.mjs';
 import {encolarRevision,resumenCola} from './cola-revision.mjs';
-import {splitProvenance,prepareProvenance,provenanceProposal,assertReplayProvenance,registryCapabilities} from './registro-provenance.mjs';
+import {splitProvenance,prepareProvenance,provenanceProposal,assertReplayProvenance,registryCapabilities,registryCutoffConfig} from './registro-provenance.mjs';
 import {ProgramAdmission} from './program-admission.mjs';
 import { claveNombre, identidadesCalculadas, escanearDuplicados, informativaPorFuente, motivoSesion, horarioImplicitoDistinto, municipioDistintoAviso, reglaDuplicado, clasificarCoincidencias } from './dedup_amalia.mjs';
 import { randomUUID } from 'node:crypto';
@@ -18,7 +18,7 @@ const UNIVERSE_MAX_DOCS=Number(process.env.AMALIA_UNIVERSE_MAX_DOCS||100000);
 const ALTAS_MAX_LECTURAS=Number(process.env.AMALIA_ALTAS_MAX_LECTURAS||5000);
 const UNIVERSE_TTL_MS=Number(process.env.AMALIA_UNIVERSE_TTL_MS||600000);
 export class EventService {
- constructor(store,media,options={}) {this.clavesModo=options.claves??process.env.AMALIA_CLAVES??'off';this.store=store;this.media=media;this.programs=options.programs||new ProgramAdmission(store);this.inflight=new Map();this.outcomes=new Map();this.registryOptions={cutoff:options.registryCutoff??process.env.AMALIA_FUENTES_V2_DESDE_ISO,now:options.now};if(typeof store.listAll==='function'&&options.warm!==false&&this.clavesModo!=='bloquea'){const write=store.write.bind(store);store.write=async(...a)=>{const r=await write(...a);if(a[0]==='eventos'){const patched=await this.patchUniverse(a,r).catch(()=>false);if(!patched)setTimeout(()=>this.warm(),0);}return r;};setTimeout(()=>this.warm(),0);}}
+ constructor(store,media,options={}) {this.clavesModo=options.claves??process.env.AMALIA_CLAVES??'off';this.store=store;this.media=media;this.programs=options.programs||new ProgramAdmission(store);this.inflight=new Map();this.outcomes=new Map();this.registryOptions={...registryCutoffConfig(options.registryCutoff),now:options.now};if(typeof store.listAll==='function'&&options.warm!==false&&this.clavesModo!=='bloquea'){const write=store.write.bind(store);store.write=async(...a)=>{const r=await write(...a);if(a[0]==='eventos'){const patched=await this.patchUniverse(a,r).catch(()=>false);if(!patched)setTimeout(()=>this.warm(),0);}return r;};setTimeout(()=>this.warm(),0);}}
  // Precalienta la caché del catálogo tras cada commit a `eventos`, para que la siguiente preparación no espere la lectura completa.
  // Tras una escritura propia con precondición de guardia (admisión, ediciones con escaneo) nadie más ha escrito entre la guardia leída y este commit:
  // se relee SOLO ese documento y se aplica a la caché en vez de recargar los ~4.000 eventos. Cualquier otra escritura invalida la caché.
@@ -37,7 +37,7 @@ export class EventService {
  // La admisión ya no necesita precargar el catálogo: consulta solo los candidatos de cada alta.
  warm(){}
  async registryContext(raw,event,principal){return prepareProvenance(this.store,raw,event,principal,{cutoff:this.registryOptions.cutoff,...(this.registryOptions.now?{now:this.registryOptions.now()}: {})});}
- async registryCapabilities(input,principal){return registryCapabilities(this.store,principal,input.fuenteId,this.registryOptions.cutoff);}
+ async registryCapabilities(input,principal){return {...await registryCapabilities(this.store,principal,input.fuenteId,this.registryOptions.cutoff),cutoffPorDefecto:this.registryOptions.porDefecto===true};}
  // Recibo por requestId (con o sin negocioId). Si el alta sigue ejecutándose devuelve estado «en_proceso» en vez de un vacío.
  async registryAdmissionReceipt({negocioId,requestId},principal){
   if(typeof requestId!=='string'||!requestId||requestId.length>128)fail('invalid_request_id');

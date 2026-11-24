@@ -27,6 +27,17 @@ export function registrySnapshot(row){
  if(typeof f.municipio!=='string'||!f.municipio.trim())fail('registro_source_identity_invalid');
  return {id:row.id,version:row.updateTime,canal:f.canal,identificador:f.identificador,url:f.url??null,nombreEntidad:f.nombre_entidad??null,municipio:f.municipio,estado:f.estado,origen:f.origen,negocioId:f.negocio_id};
 }
+/** Corte por defecto si AMALIA_FUENTES_V2_DESDE_ISO no está definida: día en que se habilitó `review` (AMALia) para la procedencia de registro. Cualquier fecha pasada vale; el corte queda en cada registro de procedencia. */
+export const REGISTRY_CUTOFF_DEFAULT='2026-11-22T00:00:00.000Z';
+let cutoffAvisado=false;
+/** Opción explícita > variable de entorno > valor por defecto con aviso en el log (una vez por proceso). Un valor presente pero mal formado sigue fallando cerrado al usarse. */
+export function registryCutoffConfig(option,env=process.env.AMALIA_FUENTES_V2_DESDE_ISO,log=m=>console.error(m)){
+ if(option!==undefined&&option!==null)return {cutoff:option,porDefecto:false};
+ const e=typeof env==='string'?env.trim():'';
+ if(e)return {cutoff:e,porDefecto:false};
+ if(!cutoffAvisado){cutoffAvisado=true;log(JSON.stringify({level:'warn',msg:'AMALIA_FUENTES_V2_DESDE_ISO no está definida: se usa el corte por defecto',cutoff:REGISTRY_CUTOFF_DEFAULT}));}
+ return {cutoff:REGISTRY_CUTOFF_DEFAULT,porDefecto:true};
+}
 export function cutoffValue(value){try{return instant(value);}catch{fail('registro_cutoff_unconfigured');}}
 export async function prepareProvenance(store,raw,event,principal,{cutoff,now=new Date().toISOString()}={}){
  if(raw===undefined)return null;
