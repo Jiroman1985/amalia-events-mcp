@@ -165,7 +165,7 @@ test('herramientas MCP: vista previa, confirmación, piezas en Kalma, recuperaci
  const registry=[{id:'conchi-owner',tokenHash:hash('token-de-ensayo-no-real'),actions:['*'],businesses:['*']},{id:'editor-a',tokenHash:hash('token-editor-ensayo'),actions:['read','create','edit'],businesses:['bizA']}];
  const app=createApp(ctx,registry);await new Promise(r=>app.listen(0,'127.0.0.1',r));const base='http://127.0.0.1:'+app.address().port,T='token-de-ensayo-no-real';
  try{
-  assert.equal(VERSION,'2.25.15');
+  assert.equal(VERSION,'2.25.16');
   const e=await f.events.create(input(),owner);
   // búsqueda pública: un evento verificado y visible aparece; retirado, no
   const doc=f.store.rows.get('eventos/'+e.eventId);doc.data.verificationStatus='verificado';doc.data.prueba=false;doc.data.fuentes=[{url:'https://example.org/e',checkedAt:'2026-10-28T07:00:00Z'}];

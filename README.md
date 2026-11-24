@@ -165,6 +165,12 @@ Pruebas reproducibles: `FIRESTORE_EMULATOR_HOST=127.0.0.1:8686 AMALIA_TEST_PUBLI
 - Municipio con alias (`Lumbier/Irunberri`, `Donostia`/`San Sebastián`…, tabla ampliable en `clave-sesion.mjs`); una clave por **día** en rangos `fechaLocal`–`fechaFinLocal` (hasta 31 días); el tipo de recinto (teatro, auditorio, museo, iglesia, plaza…) ya no se quita; fecha/hora de eventos antiguos desde `dateTime` en hora de Madrid.
 - `rellenar_claves.mjs`: lo que sobra se libera, no se borra.
 
+## 2.25.16 — tablón: autocierre, límite y requiereAtencion (SIGUE EN SOMBRA)
+
+- **Autocierre en servidor** (`autocerrar`, en `tablon.mjs`): los hilos aviso, nota y asignacion abiertos se cierran solos (`resuelto_por: "sistema"`, `nota: "autocierre"`, `autocierre_motivo`: `leido_por_todos` | `seis_horas`) cuando todos sus destinatarios los han leído (marca de lectura posterior al último mensaje de otros; «todos» = todos los agentes; el autor no cuenta) o a las 6 h de creados. duda, ayuda, cambio_zona (y evento, decision, respuesta) nunca se autocierran. Se aplica al listar, en `mis_pendientes` y `marcar_leido`, y con un barrido cada 5 min (`AMALIA_AUTOCIERRE_MS`, 0 lo desactiva). Primer barrido: unos 14 hilos antiguos abiertos se cerrarán.
+- **Límite de 30 mensajes/10 min:** `resolver_hilo` (incluida su nota) y `marcar_leido` no cuentan.
+- **`requiereAtencion`** en `listar_mensajes` (por hilo y en la vista de hilo) y `mis_pendientes`: abierto + prioridad urgente + (tipo duda, ayuda o cambio_zona, o con `esperaA`). Los hilos admiten `esperaA` opcional en `publicar_mensaje`. Ambas respuestas incluyen `requierenAtencion` (recuento). Además `listar` muestra `resueltoPor` y `nota` en hilos resueltos.
+
 ## 2.25.15 — el alta exige fechaLocal ISO, municipio y provincia (SIGUE EN SOMBRA)
 
 - `preparar_admision` y `admitir_candidato` (también simulación, lote de sesiones y eventos de programas) rechazan el alta si falta alguno: `missing_field` con `campo` = `fechaLocal` | `municipio` | `provincia` y una ayuda. Un `fechaLocal` que no sea AAAA-MM-DD da `invalid_local_date` (campo y formato).

@@ -4,13 +4,18 @@
 import { randomBytes } from 'node:crypto';
 import { fail, authorize, hash } from './event-domain.mjs';
 import { normalizeName } from './registro-fuentes.mjs';
-import { agenteCanonico } from './identidad.mjs';
+import { agenteCanonico, AGENTES } from './identidad.mjs';
 
 export const COL = 'tablon_agentes', LEC = 'tablon_lecturas';
 export const TIPOS = ['duda', 'ayuda', 'aviso', 'asignacion', 'cambio_zona', 'evento', 'decision', 'respuesta', 'nota'];
 const A_ALFRED = new Set(['duda', 'ayuda', 'cambio_zona']);        // siempre llegan a Alfred
 const REQUIEREN_RESPUESTA = new Set(['duda', 'ayuda', 'asignacion', 'cambio_zona', 'evento']);
 const AGENTE_RE = /^[a-z0-9_-]{2,40}$/;
+// Autocierre en servidor: avisos, notas y asignaciones se cierran solos cuando todos sus destinatarios los han leído o a las 6 h de creados. Dudas, ayudas y cambios de zona nunca.
+const AUTOCIERRE = new Set(['aviso', 'nota', 'asignacion']), AUTOCIERRE_MS = 6 * 60 * 60 * 1000;
+// «Necesita tu atención»: hilo abierto, urgente, y de un tipo que pide decisión (duda, ayuda, cambio_zona) o que espera a alguien concreto (esperaA).
+const TIPOS_ATENCION = new Set(['duda', 'ayuda', 'cambio_zona']);
+export const requiereAtencion = raiz => raiz.estado === 'abierto' && raiz.prioridad === 'urgente' && (TIPOS_ATENCION.has(raiz.tipo) || !!raiz.espera_a);
 const MAX_POR_VENTANA = 30, VENTANA_MS = 10 * 60 * 1000;
 const recientes = new Map();
 
@@ -41,6 +46,7 @@ function referencias(r) {
   for (const k of ['zona', 'provincia', 'municipio']) if (r[k] != null) out[k] = text(r[k], 2, 120, 'board_referencias_invalidas');
   return Object.keys(out).length ? out : null;
 }
+const resumenHilo = raiz => ({ esperaA: raiz.espera_a ?? null, requiereAtencion: requiereAtencion(raiz), ...(raiz.estado === 'resuelto' ? { resueltoPor: raiz.resuelto_por ?? null, nota: raiz.nota ?? null } : {}) });
 const resumenMsg = d => ({ id: d.id, hilo: d.hilo, autor: agenteCanonico(d.autor), agente: agenteCanonico(d.agente), principal: d.principal ?? null, tipo: d.tipo, asunto: d.asunto, texto: d.texto, destinatarios: d.destinatarios, prioridad: d.prioridad, referencias: d.referencias ?? null, creadoEn: d.creado_en, esRaiz: d.es_raiz === true });
 
 export async function publicar(store, input, principal, { now = () => new Date().toISOString() } = {}) {
@@ -49,14 +55,15 @@ export async function publicar(store, input, principal, { now = () => new Date()
   if (input.tipo === 'decision') admin(principal);
   const id = nuevoId(), d = {
     id, hilo: id, es_raiz: true, autor: agenteDe(principal.id), principal: principal.id, agente: agenteDe(principal.id), tipo: input.tipo, asunto: text(input.asunto, 3, 120, 'board_asunto_invalido'), texto: text(input.texto, 1, 2000, 'board_texto_invalido'),
-    destinatarios: destinatarios(input.destinatarios, input.tipo, A_ALFRED.has(input.tipo) ? ['alfred'] : ['todos']), prioridad: input.prioridad === 'urgente' ? 'urgente' : 'normal', estado: 'abierto', referencias: referencias(input.referencias), creado_en: now()
+    destinatarios: destinatarios(input.destinatarios, input.tipo, A_ALFRED.has(input.tipo) ? ['alfred'] : ['todos']), prioridad: input.prioridad === 'urgente' ? 'urgente' : 'normal', estado: 'abierto', referencias: referencias(input.referencias), creado_en: now(),
+    ...(input.esperaA ? { espera_a: text(input.esperaA, 2, 80, 'board_espera_a_invalido') } : {})
   };
   await store.write(COL, id, d, { create: true });
   return { publicado: true, id, hilo: id, autor: d.autor, destinatarios: d.destinatarios, mensaje: A_ALFRED.has(d.tipo) ? 'Mensaje publicado. Alfred decide en caso de duda: espera su respuesta antes de actuar.' : 'Mensaje publicado.' };
 }
 
-export async function responder(store, input, principal, { now = () => new Date().toISOString() } = {}) {
-  escribir(principal); limita(principal);
+export async function responder(store, input, principal, { now = () => new Date().toISOString(), contar = true } = {}) {
+  escribir(principal); if (contar) limita(principal);
   const raiz = await store.get(COL, input.hilo); if (!raiz || raiz.data.es_raiz !== true) fail('board_hilo_no_encontrado', { hilo: input.hilo });
   if (raiz.data.estado === 'resuelto' && !esAdminTablon(principal)) fail('board_hilo_resuelto', { ayuda: 'El hilo está resuelto: abre uno nuevo y referencia este, o pídeselo a Alfred.' });
   const tipo = input.tipo || 'respuesta'; if (!TIPOS.includes(tipo) || tipo === 'decision') fail('board_tipo_invalido', { validos: TIPOS.filter(t => t !== 'decision'), ayuda: 'Las decisiones las registra Alfred con decidir_hilo.' });
@@ -76,11 +83,12 @@ function agrupar(rows) {
 }
 const dirigidoA = (raiz, yo) => raiz.destinatarios.includes('todos') || raiz.destinatarios.includes(yo) || raiz.agente === yo || (yo === 'alfred' && A_ALFRED.has(raiz.tipo));
 
-export async function listar(store, input, principal) {
-  leer(principal); const yo = agenteDe(principal.id), hilos = agrupar(await todos(store, COL)), lect = await lecturasDe(store, yo);
+export async function listar(store, input, principal, { now = () => new Date().toISOString() } = {}) {
+  leer(principal); const yo = agenteDe(principal.id), hilos = agrupar(await todos(store, COL)); await autocerrarSeguro(store, hilos, now); const lect = await lecturasDe(store, yo);
   if (input.hilo) {
     const l = hilos.get(input.hilo); if (!l) fail('board_hilo_no_encontrado', { hilo: input.hilo });
-    return { hilo: input.hilo, estado: l[0].estado, asunto: l[0].asunto, mensajes: l.map(resumenMsg) };
+    const r0 = l.find(x => x.es_raiz) || l[0];
+    return { hilo: input.hilo, estado: r0.estado, asunto: r0.asunto, ...resumenHilo(r0), mensajes: l.map(resumenMsg) };
   }
   const desde = input.desde || null, out = [];
   for (const [id, l] of hilos) {
@@ -92,25 +100,25 @@ export async function listar(store, input, principal) {
     if (desde && ultimo.creado_en < desde) continue; if (input.soloMios && !dirigidoA(raiz, yo)) continue;
     const visto = lect.hilos[id] || '', sinLeer = l.filter(x => x.agente !== yo && x.creado_en > visto).length;
     if (input.soloSinLeer && !sinLeer) continue;
-    out.push({ hilo: id, asunto: raiz.asunto, tipo: raiz.tipo, estado: raiz.estado, prioridad: raiz.prioridad, autor: raiz.agente, destinatarios: raiz.destinatarios, referencias: raiz.referencias ?? null, creadoEn: raiz.creado_en, mensajes: l.length, ultimo: { agente: ultimo.agente, creadoEn: ultimo.creado_en, resumen: ultimo.texto.slice(0, 160) }, sinLeer });
+    out.push({ hilo: id, asunto: raiz.asunto, tipo: raiz.tipo, estado: raiz.estado, prioridad: raiz.prioridad, autor: raiz.agente, destinatarios: raiz.destinatarios, referencias: raiz.referencias ?? null, creadoEn: raiz.creado_en, mensajes: l.length, ultimo: { agente: ultimo.agente, creadoEn: ultimo.creado_en, resumen: ultimo.texto.slice(0, 160) }, sinLeer, ...resumenHilo(raiz) });
   }
   out.sort((a, b) => (a.ultimo.creadoEn < b.ultimo.creadoEn ? 1 : -1));
   const lim = Math.min(Math.max(input.limite || 50, 1), 200), off = Math.max(input.desplazamiento || 0, 0);
-  return { total: out.length, devueltos: Math.min(lim, Math.max(out.length - off, 0)), hayMas: off + lim < out.length, hilos: out.slice(off, off + lim) };
+  return { total: out.length, requierenAtencion: out.filter(x => x.requiereAtencion).length, devueltos: Math.min(lim, Math.max(out.length - off, 0)), hayMas: off + lim < out.length, hilos: out.slice(off, off + lim) };
 }
 
 /** Lo que tengo que mirar: hilos abiertos dirigidos a mí con mensajes sin leer, o que esperan mi respuesta. */
-export async function misPendientes(store, principal) {
-  leer(principal); const yo = agenteDe(principal.id), hilos = agrupar(await todos(store, COL)), lect = await lecturasDe(store, yo), items = [];
+export async function misPendientes(store, principal, { now = () => new Date().toISOString() } = {}) {
+  leer(principal); const yo = agenteDe(principal.id), hilos = agrupar(await todos(store, COL)); await autocerrarSeguro(store, hilos, now); const lect = await lecturasDe(store, yo), items = [];
   for (const [id, l] of hilos) {
     const raiz = l.find(x => x.es_raiz) || l[0]; if (raiz.estado !== 'abierto' || !dirigidoA(raiz, yo)) continue;
     const visto = lect.hilos[id] || '', sinLeer = l.filter(x => x.agente !== yo && x.creado_en > visto).length;
     const yoRespondi = l.some(x => x.agente === yo && !x.es_raiz), esperaRespuesta = REQUIEREN_RESPUESTA.has(raiz.tipo) && raiz.agente !== yo && !yoRespondi && (raiz.destinatarios.includes(yo) || (yo === 'alfred' && A_ALFRED.has(raiz.tipo)));
     if (!sinLeer && !esperaRespuesta) continue;
-    items.push({ hilo: id, asunto: raiz.asunto, tipo: raiz.tipo, prioridad: raiz.prioridad, autor: raiz.agente, sinLeer, esperaMiRespuesta: esperaRespuesta, ultimo: l.at(-1).creado_en });
+    items.push({ hilo: id, asunto: raiz.asunto, tipo: raiz.tipo, prioridad: raiz.prioridad, autor: raiz.agente, sinLeer, esperaMiRespuesta: esperaRespuesta, ultimo: l.at(-1).creado_en, esperaA: raiz.espera_a ?? null, requiereAtencion: requiereAtencion(raiz) });
   }
   items.sort((a, b) => (a.prioridad === b.prioridad ? (a.ultimo < b.ultimo ? 1 : -1) : a.prioridad === 'urgente' ? -1 : 1));
-  return { agente: yo, total: items.length, urgentes: items.filter(i => i.prioridad === 'urgente').length, pendientes: items };
+  return { agente: yo, total: items.length, urgentes: items.filter(i => i.prioridad === 'urgente').length, requierenAtencion: items.filter(i => i.requiereAtencion).length, pendientes: items };
 }
 
 export async function marcarLeido(store, input, principal, { now = () => new Date().toISOString() } = {}) {
@@ -118,10 +126,37 @@ export async function marcarLeido(store, input, principal, { now = () => new Dat
   if (!input.todos && (!input.hilo || !hilos.has(input.hilo))) fail('board_hilo_no_encontrado', { hilo: input.hilo || null });
   for (let intento = 0; intento < 3; intento++) {
     const { row, hilos: vistos } = await lecturasDe(store, yo), t = now(); const nuevo = { ...vistos }; for (const id of ids) nuevo[id] = t;
-    try { await store.write(LEC, yo, { agente: yo, hilos: nuevo, actualizado_en: t }, row ? { updateTime: row.updateTime } : { create: true }); return { leido: ids.length, agente: yo }; }
+    try { await store.write(LEC, yo, { agente: yo, hilos: nuevo, actualizado_en: t }, row ? { updateTime: row.updateTime } : { create: true }); await autocerrarSeguro(store, hilos, now); return { leido: ids.length, agente: yo }; }
     catch (e) { if (e.code !== 'version_conflict' || intento === 2) throw e; }
   }
 }
+
+/** Destinatarios que tienen que leer un hilo: los de la raíz («todos» = todos los agentes), sin el autor. */
+const lectoresDe = raiz => [...new Set((raiz.destinatarios.includes('todos') ? AGENTES : raiz.destinatarios).map(agenteCanonico))].filter(x => x !== 'todos' && x !== raiz.agente);
+/**
+ * Cierra solos los hilos aviso/nota/asignacion abiertos cuando todos sus destinatarios los han leído (marca de lectura posterior al último mensaje de otros)
+ * o han pasado 6 h desde su creación. resuelto_por «sistema», nota «autocierre». Nunca toca duda, ayuda, cambio_zona ni el resto de tipos.
+ */
+export async function autocerrar(store, { now = () => new Date().toISOString(), hilos = null } = {}) {
+  hilos = hilos || agrupar(await todos(store, COL));
+  const candidatos = [...hilos].filter(([, l]) => { const r = l.find(x => x.es_raiz) || l[0]; return r.estado === 'abierto' && AUTOCIERRE.has(r.tipo); });
+  if (!candidatos.length) return [];
+  const lect = new Map((await store.list(LEC, { limit: 500 })).map(r => [r.id, r.data?.hilos || {}])), ahora = Date.parse(now()), cerrados = [];
+  for (const [id, l] of candidatos) {
+    const raiz = l.find(x => x.es_raiz) || l[0], lectores = lectoresDe(raiz);
+    const leido = lectores.length > 0 && lectores.every(r => { const ultimoAjeno = l.filter(x => x.agente !== r).at(-1); return !ultimoAjeno || (lect.get(r)?.[id] || '') >= ultimoAjeno.creado_en; });
+    const vencido = ahora - Date.parse(raiz.creado_en) >= AUTOCIERRE_MS;
+    if (!leido && !vencido) continue;
+    const fresca = await store.get(COL, id); if (!fresca || fresca.data.estado !== 'abierto') continue;
+    const t = now(), motivo = leido ? 'leido_por_todos' : 'seis_horas';
+    try { await store.write(COL, id, { ...fresca.data, estado: 'resuelto', resuelto_por: 'sistema', resuelto_por_principal: 'sistema', resuelto_en: t, nota: 'autocierre', autocierre_motivo: motivo }, { updateTime: fresca.updateTime }); }
+    catch (e) { if (e.code === 'version_conflict') continue; throw e; }
+    raiz.estado = 'resuelto'; raiz.resuelto_por = 'sistema'; raiz.nota = 'autocierre'; cerrados.push({ hilo: id, motivo });
+  }
+  return cerrados;
+}
+// En lecturas y marcas de lectura el autocierre es de mejor esfuerzo: un fallo nunca rompe la consulta.
+const autocerrarSeguro = async (store, hilos, now) => { try { await autocerrar(store, { now, hilos }); } catch { /* se reintenta en la siguiente lectura o barrido */ } };
 
 async function cerrar(store, raiz, principal, extra, now) {
   const d = { ...raiz.data, estado: 'resuelto', resuelto_por: agenteDe(principal.id), resuelto_por_principal: principal.id, resuelto_en: now(), ...extra };
@@ -132,7 +167,7 @@ export async function resolver(store, input, principal, { now = () => new Date()
   const yo = agenteDe(principal.id), d = raiz.data;
   if (!(d.agente === yo || d.destinatarios.includes(yo) || esAdminTablon(principal))) fail('forbidden', { ayuda: 'Solo el autor, un destinatario o Alfred pueden resolver un hilo.' });
   if (d.estado === 'resuelto') return { resuelto: false, yaResuelto: true, hilo: raiz.id };
-  if (input.nota) await responder(store, { hilo: raiz.id, texto: input.nota }, principal, { now });
+  if (input.nota) await responder(store, { hilo: raiz.id, texto: input.nota }, principal, { now, contar: false });   // resolver no cuenta en el límite de mensajes
   const fresca = await store.get(COL, raiz.id); await cerrar(store, fresca, principal, {}, now);
   return { resuelto: true, hilo: raiz.id, resueltoPor: agenteDe(principal.id) };
 }

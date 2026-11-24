@@ -75,20 +75,20 @@ test('hilo: responder, no editar ni borrar, resolver y bloqueo de respuestas en 
 });
 
 test('mis_pendientes y lectura: Alfred ve las dudas sin responder; marcar_leido las baja; urgentes primero', async () => {
-  const s = new Store();
+  const s = new Store(), ahora = { now: () => '2026-11-21T10:30:00.000Z' };   // el autocierre usa el reloj: dentro de las 6 h del hilo
   const d1 = await publicar(s, { tipo: 'duda', asunto: 'Duda 1', texto: 'a' }, alfie, { now });
   const d2 = await publicar(s, { tipo: 'cambio_zona', asunto: 'Cambio de zona', texto: 'Quiero Toledo', prioridad: 'urgente' }, conchi, { now });
   await publicar(s, { tipo: 'nota', asunto: 'Nota privada', texto: 'solo hark', destinatarios: ['hark'] }, conchi, { now });
-  const p = await misPendientes(s, alfredAltas); // otro principal de Alfred: misma bandeja
+  const p = await misPendientes(s, alfredAltas, ahora); // otro principal de Alfred: misma bandeja
   assert.equal(p.agente, 'alfred'); assert.equal(p.total, 2); assert.equal(p.urgentes, 1); assert.equal(p.pendientes[0].hilo, d2.hilo); assert.equal(p.pendientes[0].esperaMiRespuesta, true);
-  assert.equal((await misPendientes(s, hark)).total, 1); assert.equal((await misPendientes(s, lola)).total, 0);
+  assert.equal((await misPendientes(s, hark, ahora)).total, 1); assert.equal((await misPendientes(s, lola, ahora)).total, 0);
   await marcarLeido(s, { hilo: d1.hilo }, alfred, { now });
-  const q = await misPendientes(s, alfred); assert.equal(q.pendientes.find(i => i.hilo === d1.hilo).sinLeer, 0); assert.equal(q.pendientes.find(i => i.hilo === d1.hilo).esperaMiRespuesta, true);
+  const q = await misPendientes(s, alfred, ahora); assert.equal(q.pendientes.find(i => i.hilo === d1.hilo).sinLeer, 0); assert.equal(q.pendientes.find(i => i.hilo === d1.hilo).esperaMiRespuesta, true);
   await decidirHilo(s, { hilo: d1.hilo, decision: 'Es la misma fuente: no la registres' }, alfred, { now });
-  assert.equal((await misPendientes(s, alfred)).total, 1);
-  const al = await misPendientes(s, alfie); assert.equal(al.total, 0); // el hilo ya está resuelto
-  const l = await listar(s, { estado: 'abierto', soloSinLeer: true, soloMios: true }, alfie); assert.equal(l.total, 0);
-  await marcarLeido(s, { todos: true }, alfred, { now }); assert.equal((await listar(s, { soloSinLeer: true }, alfred)).total, 0);
+  assert.equal((await misPendientes(s, alfred, ahora)).total, 1);
+  const al = await misPendientes(s, alfie, ahora); assert.equal(al.total, 0); // el hilo ya está resuelto
+  const l = await listar(s, { estado: 'abierto', soloSinLeer: true, soloMios: true }, alfie, ahora); assert.equal(l.total, 0);
+  await marcarLeido(s, { todos: true }, alfred, { now }); assert.equal((await listar(s, { soloSinLeer: true }, alfred, ahora)).total, 0);
   assert.equal(await code(marcarLeido(s, { hilo: 'msg_no_existe' }, alfred)), 'board_hilo_no_encontrado');
 });
 
@@ -124,4 +124,80 @@ test('zonas: asignar guarda historial y avisa en el tablón; reasignar fuentes e
   const f = s.docs.get('registro_fuentes/fte_web_a1').data; assert.equal(f.responsable, 'hark'); assert.equal(f.modificada_por, 'alfred'); assert.equal(f.historial.at(-1).cambios[0].antes, 'conchi');
   assert.equal(s.docs.get('registro_fuentes/fte_web_a3').data.responsable, 'conchi'); assert.equal(s.docs.get('registro_fuentes/fte_web_a4').data.responsable, 'conchi'); // otra provincia y fusionada: intactas
   assert.equal((await reasignarFuentesZona(s, { zona: 'Madrid', agente: 'hark' }, alfred)).fuentesQueCambian, 0);
+});
+
+// ---- autocierre, límite y requiereAtencion ----
+const hilo = (s, id) => s.docs.get('tablon_agentes/' + id).data;
+const en = (base, ms) => () => new Date(Date.parse(base) + ms).toISOString();
+const T0 = '2026-11-22T08:00:00.000Z';
+
+test('autocierre: un aviso se cierra solo cuando TODOS sus destinatarios lo han leído', async () => {
+  const s = new Store(), t = (n) => en(T0, n * 1000);
+  const p = await publicar(s, { tipo: 'aviso', asunto: 'Cambio de horario', texto: 'x', destinatarios: ['conchi', 'hark'] }, alfie, { now: t(1) });
+  await marcarLeido(s, { hilo: p.id }, conchi, { now: t(10) });
+  assert.equal(hilo(s, p.id).estado, 'abierto', 'falta hark');
+  await marcarLeido(s, { hilo: p.id }, hark, { now: t(20) });
+  const d = hilo(s, p.id); assert.equal(d.estado, 'resuelto'); assert.equal(d.resuelto_por, 'sistema'); assert.equal(d.nota, 'autocierre'); assert.equal(d.autocierre_motivo, 'leido_por_todos');
+  const v = await listar(s, { hilo: p.id }, conchi); assert.equal(v.estado, 'resuelto'); assert.equal(v.resueltoPor, 'sistema'); assert.equal(v.nota, 'autocierre');
+});
+
+test('autocierre: nota y asignacion también; evento, duda, ayuda y cambio_zona nunca, ni leídos por todos ni a las 6 h', async () => {
+  const s = new Store(), t = (n) => en(T0, n * 1000), ids = {};
+  for (const tipo of ['nota', 'asignacion', 'evento', 'duda', 'ayuda', 'cambio_zona'])
+    ids[tipo] = (await publicar(s, { tipo, asunto: 'Hilo ' + tipo, texto: 'x', destinatarios: ['conchi', 'alfred'] }, alfie, { now: t(1) })).id;
+  for (const ag of [conchi, alfred]) await marcarLeido(s, { todos: true }, ag, { now: t(30) });
+  assert.equal(hilo(s, ids.nota).estado, 'resuelto'); assert.equal(hilo(s, ids.asignacion).estado, 'resuelto');
+  for (const tipo of ['evento', 'duda', 'ayuda', 'cambio_zona']) assert.equal(hilo(s, ids[tipo]).estado, 'abierto', tipo);
+  await listar(s, {}, alfred, { now: en(T0, 7 * 3600 * 1000) });
+  for (const tipo of ['evento', 'duda', 'ayuda', 'cambio_zona']) assert.equal(hilo(s, ids[tipo]).estado, 'abierto', tipo + ' a las 7 h');
+});
+
+test('autocierre: a las 6 h de creado se cierra aunque nadie lo haya leído (ni a las 5 h 59 min)', async () => {
+  const s = new Store();
+  const p = await publicar(s, { tipo: 'nota', asunto: 'Sin leer', texto: 'x', destinatarios: ['conchi'] }, alfie, { now: en(T0, 0) });
+  await listar(s, {}, alfred, { now: en(T0, 6 * 3600 * 1000 - 60000) }); assert.equal(hilo(s, p.id).estado, 'abierto');
+  await misPendientes(s, conchi, { now: en(T0, 6 * 3600 * 1000) });
+  const d = hilo(s, p.id); assert.equal(d.estado, 'resuelto'); assert.equal(d.resuelto_por, 'sistema'); assert.equal(d.autocierre_motivo, 'seis_horas');
+});
+
+test('autocierre: «todos» exige a todos los agentes (si no, 6 h); el autor no cuenta; una respuesta nueva vuelve a pedir lectura', async () => {
+  const s = new Store(), t = (n) => en(T0, n * 1000);
+  const todos = await publicar(s, { tipo: 'aviso', asunto: 'Para todos', texto: 'x' }, alfie, { now: t(1) });
+  for (const ag of [conchi, hark, alfred]) await marcarLeido(s, { hilo: todos.id }, ag, { now: t(5) });
+  assert.equal(hilo(s, todos.id).estado, 'abierto', 'faltan agentes de «todos»');
+  const aMi = await publicar(s, { tipo: 'aviso', asunto: 'A mí mismo', texto: 'x', destinatarios: ['alfie'] }, alfie, { now: t(2) });
+  await marcarLeido(s, { hilo: aMi.id }, alfie, { now: t(6) }); assert.equal(hilo(s, aMi.id).estado, 'abierto', 'sin lectores no se cierra por lectura');
+  const a = await publicar(s, { tipo: 'aviso', asunto: 'Con réplica', texto: 'x', destinatarios: ['conchi', 'hark'] }, alfie, { now: t(10) });
+  await marcarLeido(s, { hilo: a.id }, conchi, { now: t(12) });
+  await responder(s, { hilo: a.id, texto: 'matiz', destinatarios: ['conchi', 'hark'] }, alfie, { now: t(14) });
+  await marcarLeido(s, { hilo: a.id }, hark, { now: t(16) });
+  assert.equal(hilo(s, a.id).estado, 'abierto', 'conchi no ha leído la réplica');
+  await marcarLeido(s, { hilo: a.id }, conchi, { now: t(18) }); assert.equal(hilo(s, a.id).estado, 'resuelto');
+});
+
+test('límite de mensajes: resolver_hilo (con nota) y marcar_leido no cuentan en los 30 cada 10 min', async () => {
+  const s = new Store(), u = P('limite-ensayo', ['read', 'board']), ids = [];
+  for (let i = 0; i < 25; i++) ids.push((await publicar(s, { tipo: 'duda', asunto: 'Duda ' + i, texto: 'x' }, u, { now })).id);
+  for (const id of ids.slice(0, 20)) await resolver(s, { hilo: id, nota: 'resuelta' }, u, { now });
+  for (let i = 0; i < 40; i++) await marcarLeido(s, { todos: true }, u, { now });
+  for (let i = 0; i < 5; i++) await publicar(s, { tipo: 'nota', asunto: 'Nota ' + i, texto: 'x' }, u, { now });
+  assert.equal(await code(publicar(s, { tipo: 'nota', asunto: 'La 31', texto: 'x' }, u)), 'board_rate_limited');
+});
+
+test('requiereAtencion: abierto + urgente + (duda, ayuda, cambio_zona o con esperaA)', async () => {
+  const s = new Store(), ids = {};
+  const pub = async (k, o) => { ids[k] = (await publicar(s, { asunto: 'Caso ' + k, texto: 'x', ...o }, alfie, { now })).id; };
+  await pub('duda_u', { tipo: 'duda', prioridad: 'urgente' }); await pub('ayuda_u', { tipo: 'ayuda', prioridad: 'urgente' }); await pub('zona_u', { tipo: 'cambio_zona', prioridad: 'urgente' });
+  await pub('duda_n', { tipo: 'duda' }); await pub('aviso_u', { tipo: 'aviso', prioridad: 'urgente', destinatarios: ['conchi'] });
+  await pub('aviso_u_espera', { tipo: 'aviso', prioridad: 'urgente', destinatarios: ['conchi'], esperaA: 'José Ignacio' }); await pub('nota_n_espera', { tipo: 'nota', destinatarios: ['conchi'], esperaA: 'José Ignacio' });
+  await pub('duda_u_resuelta', { tipo: 'duda', prioridad: 'urgente' }); await resolver(s, { hilo: ids.duda_u_resuelta }, alfred, { now });
+  const ahora = { now: () => '2026-11-21T10:30:00.000Z' };
+  const r = await listar(s, {}, alfred, ahora), por = Object.fromEntries(r.hilos.map(h => [h.hilo, h]));
+  const esperado = { duda_u: true, ayuda_u: true, zona_u: true, duda_n: false, aviso_u: false, aviso_u_espera: true, nota_n_espera: false, duda_u_resuelta: false };
+  for (const [k, v] of Object.entries(esperado)) assert.equal(por[ids[k]].requiereAtencion, v, k);
+  assert.equal(por[ids.aviso_u_espera].esperaA, 'José Ignacio'); assert.equal(r.requierenAtencion, 4);
+  assert.equal((await listar(s, { hilo: ids.duda_u }, alfred)).requiereAtencion, true);
+  const mp = await misPendientes(s, alfred, ahora); assert.ok(mp.pendientes.filter(i => i.requiereAtencion).every(i => i.prioridad === 'urgente'));
+  assert.equal(mp.requierenAtencion, mp.pendientes.filter(i => i.requiereAtencion).length);
+  assert.equal(await code(publicar(s, { tipo: 'nota', asunto: 'Mala espera', texto: 'x', esperaA: 'x' }, alfie)), 'board_espera_a_invalido');
 });

@@ -66,7 +66,8 @@ test('tablón: un mismo agente con varios tokens sale con UN nombre (autor, agen
 
 test('lectura robusta: documentos antiguos con alias se ven ya con el agente canónico', async () => {
   const s = new Store([{ col: 'tablon_agentes', id: 'msg_antiguo', data: { id: 'msg_antiguo', hilo: 'msg_antiguo', es_raiz: true, autor: 'alfred-altas', agente: 'alfred-altas', tipo: 'aviso', asunto: 'Antiguo', texto: 'x', destinatarios: ['amalia-asistente'], prioridad: 'normal', estado: 'abierto', creado_en: '2026-11-20T10:00:00Z' } }]);
-  const l = await listar(s, {}, conIdentidad(P('amalia-asistente', ['board']))); assert.equal(l.hilos[0].autor, 'alfred'); assert.deepEqual(l.hilos[0].destinatarios, ['amalia']); assert.equal((await misPendientes(s, conIdentidad(P('amalia', ['board'])))).total, 1);
+  const ahora = { now: () => '2026-11-20T10:30:00Z' };   // el autocierre usa el reloj: dentro de las 6 h del aviso
+  const l = await listar(s, {}, conIdentidad(P('amalia-asistente', ['board'])), ahora); assert.equal(l.hilos[0].autor, 'alfred'); assert.deepEqual(l.hilos[0].destinatarios, ['amalia']); assert.equal((await misPendientes(s, conIdentidad(P('amalia', ['board'])), ahora)).total, 1);
 });
 
 test('fuentes y altas: responsable, creada_por y revisiones usan el canónico; el principal queda en *_principal; los eventos añaden agenteCanonico', async () => {
