@@ -165,6 +165,11 @@ Pruebas reproducibles: `FIRESTORE_EMULATOR_HOST=127.0.0.1:8686 AMALIA_TEST_PUBLI
 - Municipio con alias (`Lumbier/Irunberri`, `Donostia`/`San Sebastián`…, tabla ampliable en `clave-sesion.mjs`); una clave por **día** en rangos `fechaLocal`–`fechaFinLocal` (hasta 31 días); el tipo de recinto (teatro, auditorio, museo, iglesia, plaza…) ya no se quita; fecha/hora de eventos antiguos desde `dateTime` en hora de Madrid.
 - `rellenar_claves.mjs`: lo que sobra se libera, no se borra.
 
+## 2.25.20 — claves: ficha con periodo no bloquea sesiones sueltas (SIGUE EN SOMBRA)
+
+- Las claves de los días de una ficha con **periodo** (fechaLocal–fechaFinLocal de hasta 31 días, sin `sesiones` explícitas) llevan `periodo: true` y `periodoFin`. En `decidirSesion`, una ficha con periodo frente a una sesión suelta (o al revés) **nunca bloquea**: va a la cola (`sesion_suelta_y_ficha_con_periodo`). Dos fichas con periodo, o dos sesiones sueltas, siguen igual (bloquea). `rellenar_claves` cuenta como «cambiar» las claves a las que falta o sobra el marcador.
+- Test del caso Moi Animal (Burela): dos funciones a distinta hora no se bloquean por el cruce de horas (título igual → libre; título reescrito frente a otra hora → solo aviso/cola); el bloqueo viene únicamente de la gemela de la misma hora.
+
 ## 2.25.19 — los agentes de baja no pueden ser destinatarios (SIGUE EN SOMBRA)
 
 - `publicar_mensaje` y `responder_mensaje` rechazan como destinatario a cualquier agente de `AGENTES_BAJA` (alias y mayúsculas incluidos) con `board_destinatario_baja` (`agentes`, `ayuda`). Las respuestas y decisiones por defecto en hilos antiguos omiten a los agentes de baja en vez de fallar.

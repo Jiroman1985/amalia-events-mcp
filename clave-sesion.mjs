@@ -141,7 +141,8 @@ export function sesionesDeEvento(d) {
   if (f && !lista.some(s => s.fechaLocal === f)) lista.unshift({ fechaLocal: f, horaLocal: hora });
   if (!(Array.isArray(d.sesiones) && d.sesiones.length) && f && ISO.test(f) && ISO.test(String(d.fechaFinLocal || '')) && d.fechaFinLocal > f) {
     const dias = Math.round((Date.parse(d.fechaFinLocal) - Date.parse(f)) / 864e5);
-    if (dias <= MAX_DIAS_RANGO) for (let i = 1; i <= dias; i++) lista.push({ fechaLocal: sumaDias(f, i), horaLocal: hora });
+    // Ficha con PERIODO (del f al fin, sin sesiones explícitas): sus días se marcan para que no bloqueen las sesiones sueltas (van a la cola).
+    if (dias <= MAX_DIAS_RANGO) { for (let i = 1; i <= dias; i++) lista.push({ fechaLocal: sumaDias(f, i), horaLocal: hora }); for (const s of lista) s.periodo = true; }
   }
   return lista;
 }
@@ -163,7 +164,7 @@ export function clavesDeEvento(eventId, d, { discriminador = '' } = {}) {
     const fuerte = k.fuerza === 'fuerte';
     const id = 'sk_' + hash(k.clave + (fuerte ? '' : '\0' + eventId)).slice(0, 40);
     if (out.some(o => o.id === id)) continue;
-    out.push({ id, fuerte, data: { eventId, negocioId: d.negocioId || null, clave: k.clave, fuerza: k.fuerza, municipio: k.municipio, fecha: k.fecha, hora: k.hora, recinto: k.recinto, municipioFecha: k.municipioFecha, estado: 'activa', prueba: d.prueba === true, titulo: claveNombre(leg(d, 'titulo', 'nombre')), tituloOriginal: leg(d, 'titulo', 'nombre') || null, urlNorm: d.fuentes?.[0]?.url ? normalizarUrl(d.fuentes[0].url) : null, discriminador: k.discriminador, at: new Date().toISOString() } });
+    out.push({ id, fuerte, data: { eventId, negocioId: d.negocioId || null, clave: k.clave, fuerza: k.fuerza, municipio: k.municipio, fecha: k.fecha, hora: k.hora, recinto: k.recinto, municipioFecha: k.municipioFecha, estado: 'activa', ...(s.periodo ? { periodo: true, periodoFin: d.fechaFinLocal } : {}), prueba: d.prueba === true, titulo: claveNombre(leg(d, 'titulo', 'nombre')), tituloOriginal: leg(d, 'titulo', 'nombre') || null, urlNorm: d.fuentes?.[0]?.url ? normalizarUrl(d.fuentes[0].url) : null, discriminador: k.discriminador, at: new Date().toISOString() } });
   }
   return out;
 }
@@ -206,6 +207,9 @@ export function decidirSesion(cand, vecinos, { eventId = null } = {}) {
     if (!horasDistintas && rc && !(!cand.hora !== !v.hora)) { motivos.push({ eventId: v.eventId, decision: cand.hora && cand.recinto && v.recinto ? 'bloquea' : (igual ? 'bloquea' : 'cola'), motivo: igual ? 'mismo_titulo_misma_sesion' : 'titulo_parecido_misma_sesion' }); continue; }
     motivos.push({ eventId: v.eventId, decision: 'cola', motivo: !cand.hora !== !v.hora ? 'sin_hora_frente_a_con_hora' : horasDistintas ? 'titulo_parecido_hora_distinta' : 'titulo_parecido_recinto_distinto' });
   }
+  // Una ficha con periodo frente a una sesión suelta (o al revés) nunca bloquea: va a la cola. Dos fichas con periodo, o dos sesiones sueltas, siguen las reglas normales.
+  const mixtos = new Set(vecinos.filter(v => v && (!!cand.periodo !== !!v.periodo)).map(v => v.eventId));
+  for (const m of motivos) if (m.decision === 'bloquea' && mixtos.has(m.eventId)) { m.decision = 'cola'; m.motivo = 'sesion_suelta_y_ficha_con_periodo'; }
   const decision = motivos.some(m => m.decision === 'bloquea') ? 'bloquea' : motivos.length ? 'cola' : 'libre';
   return { decision, motivos };
 }
