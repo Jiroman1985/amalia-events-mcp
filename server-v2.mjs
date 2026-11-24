@@ -33,7 +33,7 @@ process.on('uncaughtException',err=>{console.error(JSON.stringify({event:'uncaug
 process.on('unhandledRejection',reason=>{console.error(JSON.stringify({event:'unhandled_rejection',code:reason?.code||null,message:String(reason?.message||reason).slice(0,200)}));});
 
 
-export const VERSION='2.25.12';
+export const VERSION='2.25.14';
 const ID=z.string().regex(/^[A-Za-z0-9_-]{1,128}$/),BUSINESS={negocioId:ID},EVENT={...BUSINESS,eventId:ID},PIECE={...BUSINESS,pieceId:ID};
 const RIGHTS=z.object({status:z.enum(['unknown','owned','licensed','permission','public_domain']),evidence:z.string().max(2000).optional(),credit:z.string().max(500).optional()});
 const SOURCE=z.object({url:z.string().url(),checkedAt:z.string().datetime({offset:true}).nullable().optional(),sourceId:z.string().max(300).optional()});

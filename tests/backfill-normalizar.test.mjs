@@ -56,7 +56,7 @@ test('provincia: si un municipio tiene dos provincias distintas en el catálogo 
   assert.equal(solo.cambios.find(c => c.id === 'v').despues.provincia, undefined); assert.ok(solo.omitidos.provincia_poco_respaldada.ejemplos.includes('v'));
 });
 
-test('aplicarPlan: lotes con versión+1, auditoría y guardia; un lote fallido no frena a los demás', async () => {
+test('aplicarPlan: lotes con versión+1, auditoría y guardia; un conflicto puntual se reintenta', async () => {
   const plan = planNormalizacion(base), escritos = [];
   let fallar = true;
   const store = {
@@ -64,9 +64,20 @@ test('aplicarPlan: lotes con versión+1, auditoría y guardia; un lote fallido n
     async writeMany(items, { guard }) { if (fallar && items.some(i => i.key === 'a')) { fallar = false; throw Object.assign(new Error('x'), { code: 'version_conflict' }); } assert.deepEqual(guard, { updateTime: 'g1', epoch: 4 }); escritos.push(...items); },
   };
   const r = await aplicarPlan(store, plan, { lote: 1, now: '2026-11-24T10:00:00.000Z' });
-  assert.equal(r.fallos.length, 1); assert.equal(r.fallos[0].error, 'version_conflict'); assert.equal(r.ok + r.fallos[0].n, plan.cambios.length);
+  assert.equal(r.fallos.length, 0, 'el conflicto puntual se recupera con el reintento'); assert.equal(r.ok, plan.cambios.length);
   const b = escritos.find(i => i.key === 'b');
   assert.equal(b.data.version, 1); assert.equal(b.data.fechaLocal, '2099-03-22'); assert.deepEqual(b.data.normalizacion_backfill_v1.campos.sort(), ['city', 'fechaLocal', 'provincia']);
   assert.equal(b.audit.version, 1); assert.equal(b.audit.action, 'normalizado_antiguo'); assert.equal(b.audit.before.fechaLocal, null);
   assert.ok(b.updateFields.includes('fechaLocal') && b.updateFields.includes('version'));
+});
+
+test('aplicarPlan: un lote que falla se reintenta uno a uno y salta versiones con auditoría ya existente', async () => {
+  const plan = planNormalizacion([fila('p', { nombre: 'A', fecha_inicio: '2099-01-01', city: 'X', provincia: 'Y' }), fila('q', { nombre: 'B', fecha_inicio: '2099-01-02', city: 'X', provincia: 'Y' }), fila('r', { nombre: 'C', fecha_inicio: '2099-01-03', city: 'X', provincia: 'Y' })]);
+  const escritos = [], store = {
+    async get(c, id) { if (c === 'amalia_catalog_guard') return { updateTime: 'g', data: { epoch: 1 } }; return c === 'eventos/q/revisiones' && id === 'v00000001' ? { data: {} } : null; },
+    async writeMany(items) { if (items.length > 1 || items.some(i => i.key === 'r')) { if (items.some(i => i.key === 'r') && items.length === 1) throw Object.assign(new Error('x'), { code: 'firestore_http_500' }); throw Object.assign(new Error('c'), { code: 'version_conflict' }); } escritos.push(...items); },
+  };
+  const r = await aplicarPlan(store, plan, { lote: 3 });
+  assert.equal(r.ok, 2); assert.deepEqual(r.versionSaltada, [{ id: 'q', version: 2 }]); assert.deepEqual(r.fallos, [{ id: 'r', error: 'firestore_http_500' }]);
+  assert.equal(escritos.find(i => i.key === 'q').audit.version, 2);
 });

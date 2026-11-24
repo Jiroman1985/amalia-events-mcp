@@ -150,9 +150,13 @@ test('misma URL y mismo título normalizado en el mismo municipio a ≤1 día: b
   }
 });
 
-test('misma URL y título pero sin fecha en uno de los dos: bloquea', () => {
+test('misma URL y título sin fecha en uno de los dos: bloquea solo si es el mismo municipio; con otro municipio, aviso', () => {
+  const sinFecha = { id: 'ev_sinfecha', data: { titulo: 'Moi Animal', city: 'Ourense', fuentes: [{ url: 'https://teatro.example/moi' }] } };
   assert.deepEqual(ids(escanearDuplicados(cand({ fechaLocal: null }), [prev()])), ['ev_moi']);
-  assert.deepEqual(ids(escanearDuplicados(cand({ city: 'Vigo' }), [{ id: 'ev_sinfecha', data: { titulo: 'Moi Animal', city: 'Ourense', fuentes: [{ url: 'https://teatro.example/moi' }] } }])), ['ev_sinfecha']);
+  assert.deepEqual(ids(escanearDuplicados(cand(), [sinFecha])), ['ev_sinfecha']);
+  assert.deepEqual(escanearDuplicados(cand({ city: 'Vigo' }), [sinFecha]).coincidencias, []);
+  const vigo = escanearDuplicados(cand({ fechaLocal: null, city: 'Vigo' }), [prev()]);
+  assert.deepEqual(vigo.coincidencias, []); assert.ok(vigo.informativas.some(x => x.eventId === 'ev_moi'));
 });
 
 test('giras y ciclos semanales con la misma URL y título: aviso, no bloqueo (Zambomba flamenca de Duende Nazarí)', () => {

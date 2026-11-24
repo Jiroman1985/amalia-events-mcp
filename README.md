@@ -165,6 +165,16 @@ Pruebas reproducibles: `FIRESTORE_EMULATOR_HOST=127.0.0.1:8686 AMALIA_TEST_PUBLI
 - Municipio con alias (`Lumbier/Irunberri`, `Donostia`/`San Sebastián`…, tabla ampliable en `clave-sesion.mjs`); una clave por **día** en rangos `fechaLocal`–`fechaFinLocal` (hasta 31 días); el tipo de recinto (teatro, auditorio, museo, iglesia, plaza…) ya no se quita; fecha/hora de eventos antiguos desde `dateTime` en hora de Madrid.
 - `rellenar_claves.mjs`: lo que sobra se libera, no se borra.
 
+## 2.25.14 — consulta de candidatos solo por fechaLocal (SIGUE EN SOMBRA)
+
+- Backfill aplicado: `backfill_normalizar.mjs` en dry-run da 0 cambios (5.006 eventos; 4.533 con `fechaLocal`). Los 473 restantes no tienen ninguna fecha utilizable (sin fecha, «Hasta el…», UTC ambiguo…), así que tampoco podían coincidir por fecha.
+- `candidateUniverse` consulta una sola vez por ventana, sobre `fechaLocal` (antes también `fecha_inicio` y `dateTime`). Todo escritor externo debe rellenar `fechaLocal`; `node backfill_normalizar.mjs` (dry-run) sirve de comprobación periódica.
+
+## 2.25.13 — url_titulo sin fecha exige municipio; backfill con reintento (SIGUE EN SOMBRA)
+
+- `url_titulo`: cuando uno de los dos no tiene fecha, también exige el mismo municipio para bloquear; con otro municipio es aviso.
+- `aplicarPlan` (backfill): un lote que falla se reintenta documento a documento y, si ya existe una revisión con la versión siguiente (historial incoherente con el documento), usa la siguiente libre.
+
 ## 2.25.12 — url_titulo más preciso (SIGUE EN SOMBRA)
 
 - `url_titulo` (misma URL de origen + mismo título normalizado) solo **bloquea** si además es el mismo municipio y la fecha dista ≤1 día, o si uno de los dos no tiene fecha. Con otro municipio u otro día es aviso (`url_fuente_otra_sesion`): giras (p. ej. «Zambomba flamenca navideña con Duende Nazarí» en Gorafe, Játar y Ventas de Huelma) y ciclos semanales comparten URL y título. Sigue exento un evento por sesiones o con `sesionId` explícito distinto en ambos.

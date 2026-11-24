@@ -116,7 +116,7 @@ export class EventService {
   * Universo ACOTADO para comprobar duplicados de UN candidato: no lee el catálogo. Consulta (índice de campo único) los eventos con fecha de sesión
   * entre -1 y +1 día de cada sesión del candidato, sin los ya pasados, y los limita al mismo municipio o provincia; además lecturas puntuales
   * de la identidad calculada y de la reserva de origen. La guardia se lee ANTES de las consultas: si alguien escribe después, el commit falla por contienda.
-  * Cubre documentos canónicos (fechaLocal), legacy (fecha_inicio) y los que solo traen dateTime ISO.
+  * Una sola consulta por ventana, sobre fechaLocal: el backfill normalizó los eventos antiguos (los que no tienen ninguna fecha utilizable no podían coincidir por fecha). Todo escritor debe rellenar fechaLocal.
   */
  async candidateUniverse(e,{requireOpen=false}={}) {
   const guard=await this.catalogGuard({requireOpen});
@@ -129,8 +129,7 @@ export class EventService {
   const porId=new Map(),add=r=>{if(r?.id&&!porId.has(r.id))porId.set(r.id,r);};
   const rango=async(campo,lo,hi)=>typeof this.store.queryRango==='function'?this.store.queryRango('eventos',campo,lo,hi):this.#rangoEnMemoria(campo,lo,hi);
   for(const v of ventanas){
-   const [a,b,c]=await Promise.all([rango('fechaLocal',v.lo,v.hi),rango('fecha_inicio',v.lo,v.hi),rango('dateTime',v.lo,v.hi+'\uffff')]);
-   for(const r of [...a,...b,...c])add(r);
+   for(const r of await rango('fechaLocal',v.lo,v.hi))add(r);
   }
   for(const id of identidadesCalculadas(e))add(await this.store.get('eventos',id));
   // Misma URL de origen en cualquier fecha: lectura indexada (igualdad sobre link y enlace_original), para detectar un reingreso con la fecha mal leída fuera de la ventana.

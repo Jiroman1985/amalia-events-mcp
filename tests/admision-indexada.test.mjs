@@ -92,9 +92,9 @@ test('los eventos pasados no se consultan: la ventana empieza hoy', async () => 
   assert.ok(store.consultas.every(c => c.desde >= hoy), JSON.stringify(store.consultas));
 });
 
-test('documentos legacy (solo fecha_inicio) y la identidad calculada se detectan sin recorrer el catálogo', async () => {
+test('documentos antiguos ya normalizados (con fechaLocal) y la identidad calculada se detectan sin recorrer el catálogo', async () => {
   const { store, events } = await banco(5200);
-  store.rows.set('eventos/ev_legacy', { data: { nombre: 'Concierto de otoño', ciudad: 'Almagro', fecha_inicio: '2099-10-05', enlace_original: 'https://legacy.es/otono', version: 1 }, updateTime: '1' });
+  store.rows.set('eventos/ev_legacy', { data: { nombre: 'Concierto de otoño', ciudad: 'Almagro', city: 'Almagro', fechaLocal: '2099-10-05', fecha_inicio: '2099-10-05', enlace_original: 'https://legacy.es/otono', version: 1 }, updateTime: '1' });
   const p = await events.prepareAdmission(nuevo({ titulo: 'Concierto de otoño', fechaLocal: '2099-10-05', horaLocal: null, fuentes: [{ url: 'https://legacy.es/otono', checkedAt: '2026-11-01T10:00:00.000Z' }] }), owner);
   assert.ok((p.coincidencias.concat(p.informativas)).some(c => c.eventId === 'ev_legacy'));
   const a = await events.create(nuevo({ fechaLocal: '2099-11-11' }), owner);
@@ -166,4 +166,12 @@ test('gira con la misma URL y título en municipios distintos: se admiten las tr
   assert.deepEqual(p.informativas.map(x => x.eventId).sort(), [a.eventId, b.eventId].sort());
   const repetida = await events.prepareAdmission(parada('Játar', '2099-12-20'), owner);
   assert.equal(repetida.admisible, false); assert.ok(repetida.coincidencias.some(c => c.eventId === b.eventId && c.motivos.includes('url_titulo')));
+});
+
+test('la consulta de candidatos usa solo el campo fechaLocal', async () => {
+  const { store, events } = await banco(500);
+  store.rows.set('eventos/ev_sin_fechalocal', { data: { nombre: 'Sin normalizar', city: 'Almagro', fecha_inicio: '2099-10-05', version: 1 }, updateTime: '1' });
+  const p = await events.prepareAdmission(nuevo({ titulo: 'Sin normalizar', fechaLocal: '2099-10-05', horaLocal: null }), owner);
+  assert.ok(store.consultas.length > 0 && store.consultas.every(c => c.campo === 'fechaLocal'), JSON.stringify(store.consultas.map(c => c.campo)));
+  assert.equal(p.coincidencias.concat(p.informativas).some(c => c.eventId === 'ev_sin_fechalocal'), false, 'un documento sin fechaLocal ya no entra por fecha: el backfill debe haberlo normalizado');
 });

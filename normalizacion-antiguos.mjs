@@ -80,21 +80,28 @@ export function planNormalizacion(rows) {
   return { cambios, omitidos: Object.fromEntries(Object.entries(omitidos).map(([k, v]) => [k, { n: v.length, ejemplos: v.slice(0, 5) }])), resumen };
 }
 
-/** Escribe el plan en lotes atómicos (versión+1, auditoría, guardia del catálogo). Un lote que falla no impide los siguientes; se informa. */
+/** Escribe el plan en lotes atómicos (versión+1, auditoría, guardia del catálogo). Un lote que falla se reintenta documento a documento; solo lo que sigue fallando se informa. */
 export async function aplicarPlan(store, plan, { lote = 100, now = new Date().toISOString() } = {}) {
-  const resultado = { ok: 0, fallos: [] };
+  const resultado = { ok: 0, fallos: [], versionSaltada: [] };
+  const guardia = async () => { const g = await store.get('amalia_catalog_guard', 'eventos'); if (!g?.updateTime || !Number.isSafeInteger(g.data.epoch)) throw Object.assign(new Error('catalog_guard_unavailable'), { code: 'catalog_guard_unavailable' }); return { updateTime: g.updateTime, epoch: g.data.epoch }; };
+  const item = (c, version) => {
+    const patch = { ...c.despues, version, normalizacion_backfill_v1: { at: now, campos: Object.keys(c.despues), origen: c.origen } };
+    return { key: c.id, data: patch, updateTime: c.updateTime, updateFields: Object.keys(patch), audit: { version, actor: 'backfill', actorPrincipal: 'backfill_normalizar', action: 'normalizado_antiguo', reason: 'Normalizar fechaLocal, municipio y provincia de eventos antiguos', at: now, before: { version: c.version, ...c.antes }, after: patch } };
+  };
+  const revision = (id, v) => store.get('eventos/' + id + '/revisiones', 'v' + String(v).padStart(8, '0'));
   for (let i = 0; i < plan.cambios.length; i += lote) {
     const tanda = plan.cambios.slice(i, i + lote);
-    try {
-      const guard = await store.get('amalia_catalog_guard', 'eventos');
-      if (!guard?.updateTime || !Number.isSafeInteger(guard.data.epoch)) throw Object.assign(new Error('catalog_guard_unavailable'), { code: 'catalog_guard_unavailable' });
-      const items = tanda.map(c => {
-        const patch = { ...c.despues, version: c.version + 1, normalizacion_backfill_v1: { at: now, campos: Object.keys(c.despues), origen: c.origen } };
-        return { key: c.id, data: patch, updateTime: c.updateTime, updateFields: Object.keys(patch), audit: { version: patch.version, actor: 'backfill', actorPrincipal: 'backfill_normalizar', action: 'normalizado_antiguo', reason: 'Normalizar fechaLocal, municipio y provincia de eventos antiguos', at: now, before: { version: c.version, ...c.antes }, after: patch } };
-      });
-      await store.writeMany(items, { guard: { updateTime: guard.updateTime, epoch: guard.data.epoch } });
-      resultado.ok += tanda.length;
-    } catch (e) { resultado.fallos.push({ desde: tanda[0].id, n: tanda.length, error: e.code || e.message }); }
+    try { await store.writeMany(tanda.map(c => item(c, c.version + 1)), { guard: await guardia() }); resultado.ok += tanda.length; continue; }
+    catch (e) { if (tanda.length === 1 && e.code !== 'version_conflict') { resultado.fallos.push({ id: tanda[0].id, error: e.code || e.message }); continue; } }
+    // Reintento uno a uno. Si ya existe una revisión con esa versión (historial incoherente con el documento), se usa la siguiente libre.
+    for (const c of tanda) {
+      try {
+        let v = c.version + 1;
+        for (let k = 0; k < 5 && await revision(c.id, v); k++) v++;
+        await store.writeMany([item(c, v)], { guard: await guardia() });
+        resultado.ok++; if (v !== c.version + 1) resultado.versionSaltada.push({ id: c.id, version: v });
+      } catch (e) { resultado.fallos.push({ id: c.id, error: e.code || e.message }); }
+    }
   }
   return resultado;
 }
