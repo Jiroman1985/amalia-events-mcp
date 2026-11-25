@@ -9,7 +9,7 @@ import { clasifica, MonitorPlataforma } from './plataforma.mjs';
 import { encolar, listar as listarCola, marcar as marcarCola, superaIntentos, resumenPorAgente } from './cola-admision.mjs';
 import { publicar as publicarTablon, cerrarAlertaAuto } from './tablon.mjs';
 import { listarTareas } from './tareas.mjs';
-import { objetivos as objetivosAltas, SIN_ALTAS_MS, ERRORES_REPETIDOS_N, ERRORES_VENTANA_MS } from './ritmo.mjs';
+import { objetivos as objetivosAltas, SIN_ALTAS_MS, ERRORES_REPETIDOS_N, ERRORES_VENTANA_MS, turnoDe, enTurno, minutosLaborables } from './ritmo.mjs';
 import { assertAltaCompleta,normSesiones,conPlazo,DomainError,assertFuentePrimaria,mergeSources,tituloSoloForma,canonicalInputExtras,canonicalInput,eventIdentity,fingerprint,record,authorize,authorizeCapture,id,fail,hash,originKey,normalizeText } from './event-domain.mjs';
 
 // Campos opcionales de ficha en candidatos privados: se validan con las mismas reglas que la admisión.
@@ -161,20 +161,21 @@ export class EventService {
   const nombres=[...new Set([...Object.keys(objs),...altas.map(a=>a.agente).filter(Boolean),...Object.keys(cola)])].sort(),agentes=[];
   for(const agente of nombres){
    const mias=altas.filter(a=>a.agente===agente),h1=mias.filter(a=>a.t>=ahora-3600*1000).length,ult=mias.reduce((m,a)=>Math.max(m,a.t),0)||null,obj=objs[agente]||null;
-   const min=ult==null?null:Math.floor((ahora-ult)/60000);
+   const turno=turnoDe(obj),min=ult==null?null:Math.floor((ahora-ult)/60000),minLab=minutosLaborables(ult??ahora-24*3600*1000,ahora,turno);
    const tareas=obj?(await listarTareas(this.store,{agente,estado:'en_curso'},this.servidor).catch(()=>({total:0}))).total:0;
-   const estado=!obj?'sin_objetivo':(min==null||min>=SIN_ALTAS_MS()/60000)?'parado':mias.length<obj.min?'por_debajo':mias.length>obj.max?'por_encima':'en_objetivo';
-   agentes.push({agente,altasUltimaHora:h1,altasUltimas24h:mias.length,ultimaAltaEn:ult?new Date(ult).toISOString():null,minutosSinAltas:min,objetivo:obj?{minimoDia:obj.min,maximoDia:obj.max,porHoraEfectiva:Math.ceil(obj.min/obj.horasEfectivas)}:null,avanceMinimoDiaPct:obj?Math.round(mias.length/Math.max(1,obj.min)*100):null,estado,colaPendiente:cola[agente]||{pendientes:0,motivos:{}},tareasEnCurso:tareas,erroresPlataforma2h:this.monitor.erroresDesde(2*3600*1000,{agente}),alertasAbiertas:[...abiertas.keys()].filter(k=>k.split(':')[1]===agente)});
+   const estado=!obj?'sin_objetivo':minLab>=SIN_ALTAS_MS()/60000?'parado':mias.length<obj.min?'por_debajo':mias.length>obj.max?'por_encima':'en_objetivo';
+   agentes.push({agente,altasUltimaHora:h1,altasUltimas24h:mias.length,ultimaAltaEn:ult?new Date(ult).toISOString():null,minutosSinAltas:min,minutosSinAltasEnTurno:minLab,turno:obj?`${turno.desde}-${turno.hasta} (hora de Madrid)`:null,enTurnoAhora:obj?enTurno(ahora,turno):null,objetivo:obj?{minimoDia:obj.min,maximoDia:obj.max,porHoraEfectiva:Math.ceil(obj.min/obj.horasEfectivas)}:null,avanceMinimoDiaPct:obj?Math.round(mias.length/Math.max(1,obj.min)*100):null,estado,colaPendiente:cola[agente]||{pendientes:0,motivos:{}},tareasEnCurso:tareas,erroresPlataforma2h:this.monitor.erroresDesde(2*3600*1000,{agente}),alertasAbiertas:[...abiertas.keys()].filter(k=>k.split(':')[1]===agente)});
   }
-  return {generadoEn:new Date(ahora).toISOString(),ventana:'24 h (las altas retiradas y de prueba no cuentan)',sinAltasAlertaTrasMin:SIN_ALTAS_MS()/60000,agentes,colaTotalPendiente:Object.values(cola).reduce((a,c)=>a+c.pendientes,0)};
+  return {generadoEn:new Date(ahora).toISOString(),ventana:'24 h (las altas retiradas y de prueba no cuentan)',sinAltasAlertaTrasMinEnTurno:SIN_ALTAS_MS()/60000,agentes,colaTotalPendiente:Object.values(cola).reduce((a,c)=>a+c.pendientes,0)};
  }
  /** Una vuelta de vigilancia: abre (una sola por agente y asunto) y cierra solas las alertas del tablón. Alfred: agente con objetivo >2 h sin altas con cola o tareas en curso; error de config/plataforma repetido 3 veces en 15 min (esperaA inaki: es del servidor). */
  async vigilar({ahora=Date.now()}={}){
-  const r=await this.ritmoAltas(this.servidor,{ahora}),abiertas=await this.#alertasAbiertas(),debidas=new Map();
+  const r=await this.ritmoAltas(this.servidor,{ahora}),abiertas=await this.#alertasAbiertas(),debidas=new Map(),fueraDeTurno=new Set();
   for(const a of r.agentes){
    if(a.objetivo&&a.estado==='parado'&&(a.colaPendiente.pendientes>0||a.tareasEnCurso>0)){
-    const h=a.minutosSinAltas==null?'más de 24':String(Math.floor(a.minutosSinAltas/60));
-    debidas.set('ritmo:'+a.agente,{asunto:`Ritmo: ${a.agente} lleva ${h} h sin altas`,texto:`${a.agente} tiene objetivo de ${a.objetivo.minimoDia}-${a.objetivo.maximoDia} altas/día y lleva ${h} h sin dar ninguna (${a.altasUltimas24h} en 24 h). Cola de admisión pendiente: ${a.colaPendiente.pendientes}${Object.keys(a.colaPendiente.motivos||{}).length?' ('+Object.entries(a.colaPendiente.motivos).map(([k,n])=>k+' '+n).join(', ')+')':''}; tareas en curso: ${a.tareasEnCurso}. Mira ritmo_altas y salud_admision. La alerta se cierra sola cuando vuelva a dar altas.`,servidor:false});
+    const h=String(Math.floor(a.minutosSinAltasEnTurno/60));
+    if(a.enTurnoAhora!==true)fueraDeTurno.add('ritmo:'+a.agente);
+    debidas.set('ritmo:'+a.agente,{asunto:`Ritmo: ${a.agente} lleva ${h} h de turno sin altas`,texto:`${a.agente} tiene objetivo de ${a.objetivo.minimoDia}-${a.objetivo.maximoDia} altas/día y lleva ${h} h de turno (${a.turno}) sin dar ninguna (${a.altasUltimas24h} en 24 h). Cola de admisión pendiente: ${a.colaPendiente.pendientes}${Object.keys(a.colaPendiente.motivos||{}).length?' ('+Object.entries(a.colaPendiente.motivos).map(([k,n])=>k+' '+n).join(', ')+')':''}; tareas en curso: ${a.tareasEnCurso}. Mira ritmo_altas y salud_admision. La alerta se cierra sola cuando vuelva a dar altas.`,servidor:false});
    }
   }
   const n=ERRORES_REPETIDOS_N(),vent=ERRORES_VENTANA_MS();
@@ -184,7 +185,7 @@ export class EventService {
   }
   const out={abiertas:[],cerradas:[]};
   for(const [clave,d] of debidas){
-   if(abiertas.has(clave))continue;
+   if(abiertas.has(clave)||fueraDeTurno.has(clave))continue; // fuera de turno no se abren alertas de ritmo (las abiertas siguen hasta que se resuelva la causa)
    try{const p=await publicarTablon(this.store,{tipo:'ayuda',asunto:d.asunto.slice(0,120),texto:d.texto.slice(0,1900),destinatarios:['alfred'],prioridad:'urgente',...(d.servidor?{esperaA:'inaki'}:{})},this.servidor,{extra:{alerta_auto:true,alerta_clave:clave}});out.abiertas.push({clave,hilo:p.id});console.error(JSON.stringify({level:'warn',event:'alerta_abierta',clave}));}
    catch(e){console.error(JSON.stringify({level:'warn',event:'alerta_fallida',clave,error:e?.code||'error'}));}
   }

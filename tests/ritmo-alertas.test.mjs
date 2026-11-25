@@ -2,11 +2,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventService } from '../event-service.mjs';
 import { MonitorPlataforma } from '../plataforma.mjs';
-import { objetivos } from '../ritmo.mjs';
+import { objetivos, parseTurno, enTurno, minutosLaborables } from '../ritmo.mjs';
 import { publicarTarea } from '../tareas.mjs';
 import { MemoryStore, owner, alfred, evento, capturaLog } from './helpers/memoria.mjs';
 
 const HORA = 3600 * 1000;
+// Los tests con hora real no dependen del turno: 0-24 = siempre en turno. Los de turno fijan fechas concretas.
+process.env.AMALIA_TURNO_ALTAS = '0-24';
 const montar = () => { const reloj = { t: Date.now() }, store = new MemoryStore(), monitor = new MonitorPlataforma({ ahora: () => reloj.t }); return { reloj, store, s: new EventService(store, {}, { warm: false, cola: true, monitor, registryCutoff: '2026-11-22T00:00:00Z', resolvePrincipal: id => ({ 'amalia-asistente': owner, alfred })[id] || null }) }; };
 const alta = async (s, n, p = owner) => { const prep = await s.prepareAdmission(evento(n), p); return s.admitCandidate({ accion: 'admit', proposalHash: prep.proposalHash, evento: prep.evento }, p); };
 // El almacén de prueba no tiene consulta indexada: se usa la caché del catálogo, que hay que invalidar al reescribir la fecha a mano.
@@ -32,7 +34,7 @@ test('alerta a Alfred a las 2 h sin altas (con tareas en curso) y se cierra sola
     assert.equal((await s.vigilar()).abiertas.length, 0, 'a 1 h 48 min todavía no');
     envejecer(s, store, a.eventId, 2.2 * HORA);
     const v = await s.vigilar(); assert.equal(v.abiertas.length, 1); assert.equal(v.abiertas[0].clave, 'ritmo:amalia');
-    const [al] = alertas(store); assert.equal(al.tipo, 'ayuda'); assert.equal(al.prioridad, 'urgente'); assert.deepEqual(al.destinatarios, ['alfred']); assert.equal(al.estado, 'abierto'); assert.equal(al.requiere_atencion, true); assert.equal(al.espera_a, undefined); assert.match(al.asunto, /amalia lleva 2 h sin altas/);
+    const [al] = alertas(store); assert.equal(al.tipo, 'ayuda'); assert.equal(al.prioridad, 'urgente'); assert.deepEqual(al.destinatarios, ['alfred']); assert.equal(al.estado, 'abierto'); assert.equal(al.requiere_atencion, true); assert.equal(al.espera_a, undefined); assert.match(al.asunto, /amalia lleva 2 h de turno sin altas/);
     assert.equal((await s.vigilar()).abiertas.length, 0, 'una sola alerta abierta por agente y asunto'); assert.equal(alertas(store).filter(x => x.estado === 'abierto').length, 1);
     await alta(s, 2); // el agente reanuda
     const cierre = await s.vigilar(); assert.deepEqual(cierre.cerradas.map(x => x.clave), ['ritmo:amalia']);
@@ -76,3 +78,46 @@ test('objetivos: por defecto AMALia 100-200; una variable inválida vuelve al de
   assert.deepEqual(objetivos('esto no es json', m => avisos.push(m)).amalia.min, 100); assert.equal(avisos.length, 1);
   objetivos('{"amalia":{"min":50,"max":10}}', m => avisos.push(m)); assert.equal(avisos.length, 2);
 });
+
+// Madrid en noviembre = UTC+1. Última alta a las 21:00 (20:00Z) del 24/11; turno 8-22.
+const fijaAlta = async (s, store, iso) => { const a = await alta(s, 1); store.rows.get('eventos/' + a.eventId).data.fechaCreacion = iso; s.universeCache = null; return a; };
+const conTurno = async (turno, fn) => { const ant = process.env.AMALIA_TURNO_ALTAS; process.env.AMALIA_TURNO_ALTAS = turno; try { await fn(); } finally { process.env.AMALIA_TURNO_ALTAS = ant; } };
+
+test('turno: el reloj de «sin altas» solo corre en turno (la noche no cuenta)', () => conTurno('8-22', () => {
+  const t = parseTurno('8-22'); assert.deepEqual(t, { desde: 8, hasta: 22 });
+  assert.equal(enTurno(Date.parse('2026-11-24T20:00:00Z'), t), true, '21:00 Madrid');
+  assert.equal(enTurno(Date.parse('2026-11-24T21:30:00Z'), t), false, '22:30 Madrid');
+  assert.equal(enTurno(Date.parse('2026-11-25T06:59:00Z'), t), false, '07:59 Madrid');
+  assert.equal(enTurno(Date.parse('2026-11-25T07:00:00Z'), t), true, '08:00 Madrid');
+  assert.equal(minutosLaborables(Date.parse('2026-11-24T20:00:00Z'), Date.parse('2026-11-25T08:30:00Z'), t), 60 + 90, '21:00→22:00 y 08:00→09:30');
+  assert.equal(minutosLaborables(Date.parse('2026-11-24T20:00:00Z'), Date.parse('2026-11-25T01:00:00Z'), t), 60, 'toda la noche cuenta 0');
+  const avisos = []; assert.deepEqual(parseTurno('de 8 a 22', m => avisos.push(m)), { desde: 8, hasta: 22 }); assert.equal(avisos.length, 1);
+  assert.equal(enTurno(Date.parse('2026-11-24T23:30:00Z'), parseTurno('22-6')), true, 'turno de noche 22-6');
+}));
+
+test('turno: de noche no se abre alerta de ritmo; por la mañana tampoco hasta acumular 2 h de turno; una abierta no se cierra por la noche', async () => conTurno('8-22', async () => {
+  const { s, store } = montar(), log = capturaLog();
+  try {
+    await fijaAlta(s, store, '2026-11-24T20:00:00Z'); // 21:00 Madrid
+    await publicarTarea(store, { titulo: 'Altas de Andalucía', estado: 'en_curso' }, owner);
+    const noche = await s.vigilar({ ahora: Date.parse('2026-11-25T01:00:00Z') }); assert.equal(noche.abiertas.length, 0, 'madrugada: solo 60 min de turno desde la última alta');
+    const temprano = await s.vigilar({ ahora: Date.parse('2026-11-25T07:30:00Z') }); assert.equal(temprano.abiertas.length, 0, '08:30: 90 min de turno');
+    const r = await s.ritmoAltas(owner, { ahora: Date.parse('2026-11-25T07:30:00Z') }), am = r.agentes.find(x => x.agente === 'amalia');
+    assert.equal(am.minutosSinAltasEnTurno, 90); assert.equal(am.estado, 'por_debajo'); assert.ok(am.minutosSinAltas > 600); assert.equal(am.turno, '8-22 (hora de Madrid)');
+    const manana = await s.vigilar({ ahora: Date.parse('2026-11-25T08:30:00Z') }); assert.deepEqual(manana.abiertas.map(x => x.clave), ['ritmo:amalia'], '09:30: 150 min de turno');
+    const nocheDespues = await s.vigilar({ ahora: Date.parse('2026-11-25T23:30:00Z') }); assert.equal(nocheDespues.cerradas.length, 0, 'la causa sigue: no se cierra por ser de noche'); assert.equal(nocheDespues.abiertas.length, 0);
+    await alta(s, 2); // da altas: se cierra sola (a la hora real; turno 8-22 puede estar fuera de turno ahora, pero la causa ya no existe)
+    const cierre = await s.vigilar({ ahora: Date.now() + 1000 }); assert.deepEqual(cierre.cerradas.map(x => x.clave), ['ritmo:amalia']);
+  } finally { log.restaurar(); }
+}));
+
+test('turno: fuera de turno con causa activa y sin alerta previa no abre ninguna', async () => conTurno('8-22', async () => {
+  const { s, store } = montar(), log = capturaLog();
+  try {
+    await fijaAlta(s, store, '2026-11-24T10:00:00Z'); // 11:00 Madrid
+    await publicarTarea(store, { titulo: 'Altas de Andalucía', estado: 'en_curso' }, owner);
+    const r = await s.vigilar({ ahora: Date.parse('2026-11-24T23:00:00Z') }); // 00:00 Madrid: 11 h de turno sin altas pero fuera de turno
+    assert.equal(r.abiertas.length, 0); assert.equal((await s.ritmoAltas(owner, { ahora: Date.parse('2026-11-24T23:00:00Z') })).agentes[0].estado, 'parado');
+    const dia = await s.vigilar({ ahora: Date.parse('2026-11-25T07:30:00Z') }); assert.equal(dia.abiertas.length, 1, 'al empezar el turno, con la causa activa, avisa');
+  } finally { log.restaurar(); }
+}));
