@@ -606,9 +606,16 @@ export class EventService {
  async list({negocioId,cursor,limit=50,desde,hasta,incluirRetirados=false},principal) {authorize(principal,negocioId,'read');await this.business(negocioId);const rows=await this.store.list('eventos',{business:negocioId,cursor,limit});return {eventos:rows.filter(r=>(incluirRetirados||r.data.retirado!==true)&&(!desde||(r.data.fechaLocal||r.data.dateTime?.slice(0,10))>=desde)&&(!hasta||(r.data.fechaLocal||r.data.dateTime?.slice(0,10))<=hasta)).map(r=>({eventId:r.id,...r.data})),nextCursor:rows.length===limit?rows.at(-1).id:null};}
  async findDuplicates(input,principal) {
   authorize(principal,null,'read');
+  // Sin NINGÚN criterio la respuesta «0 coincidencias, exhaustivo» sería engañosa: se rechaza.
+  if(!['titulo','city','municipio','fechaLocal','desde','hasta','sesionId','origen','lugar'].some(k=>input[k])&&!(input.urls?.length)&&!(input.sourceIds?.length))fail('busqueda_vacia',{ayuda:'Indica al menos un criterio: título, municipio, fechaLocal, desde/hasta, urls, sourceIds u origen.'});
+  await this.cargarAlias();
   const urls=(input.urls||[]).map(u=>String(u)),sourceIds=(input.sourceIds||[]).map(s=>String(s));
-  const fMun=input.municipio?normalizeText(input.municipio):null,fDesde=input.desde||null,fHasta=input.hasta||null;
+  const fMun=input.municipio?normalizeText(input.municipio):null,fMunClave=input.municipio?municipioClave(input.municipio):null,fDesde=input.desde||null,fHasta=input.hasta||null;
   const title=input.titulo?normalizeText(input.titulo):null,city=input.city?normalizeText(input.city):null,fecha=input.fechaLocal||null,sesion=input.sesionId||(fecha?`${fecha}/${input.horaLocal||'sin-hora'}`:null),sesionExplicita=!!input.sesionId;
+  // Sin fechaLocal las reglas de duplicado (nombre+fecha+lugar+hora) no pueden aplicarse: se busca por título o se listan los registros que cumplen los filtros. Son informativas: nunca bloquean.
+  const modo=fecha||input.urls?.length||input.sourceIds?.length||input.origen||input.sesionId?'duplicado':input.titulo?'titulo':'listado';
+  const tituloClave=input.titulo?claveNombre(input.titulo):'',cityClave=input.city?municipioClave(input.city):'',palabras=tituloClave.split(' ').filter(w=>w.length>2),LISTADO_MAX=200;
+  let filtroTotal=0;
   let found=new Map();
   const add=(r,motivo)=>{const cur=found.get(r.id)||{row:r,motivos:[]};if(!cur.motivos.includes(motivo))cur.motivos.push(motivo);found.set(r.id,cur);};
   let huerfana=null;
@@ -626,7 +633,7 @@ export class EventService {
   let escaneados=0,exhaustivo=true,motivoParcial=null,intentos=0,guardAntes=null,guardDespues=null,estado={},omitidasPrueba=0;
   // Barrido paginado por id. Si el catálogo cambia mientras se lee (otra admisión o edición), un documento nuevo podría quedar detrás del cursor: se repite el barrido; si sigue cambiando, el resultado se marca NO exhaustivo.
   for(intentos=1;intentos<=3;intentos++){
-   found=new Map(base.map(([k,v])=>[k,{row:v.row,motivos:[...v.motivos]}]));
+   found=new Map(base.map(([k,v])=>[k,{row:v.row,motivos:[...v.motivos]}]));filtroTotal=0;
    let cursor=null;escaneados=0;exhaustivo=true;motivoParcial=null;estado={retirados:0,prueba:0,cancelados:0,vigentes:0};omitidasPrueba=0;
    guardAntes=await guardUpdate();
    while(escaneados<limite){
@@ -639,7 +646,7 @@ export class EventService {
      const dSourceIds=(d.fuentes||[]).map(s=>s.sourceId).filter(Boolean);
      const dTitulo=normalizeText(leg(d,'titulo','nombre')),dCity=normalizeText(leg(d,'city','ciudad')||(typeof d.ubicacion==='string'?d.ubicacion:d.ubicacion?.municipio));
      const dFecha=leg(d,'fechaLocal','fecha_inicio')||d.dateTime?.slice(0,10)||null;
-     if(fMun&&dCity!==fMun)continue;
+     if(fMun&&dCity!==fMun&&municipioClave(leg(d,'city','ciudad')||(typeof d.ubicacion==='string'?d.ubicacion:d.ubicacion?.municipio)||'')!==fMunClave)continue;
      if((fDesde&&(!dFecha||dFecha<fDesde))||(fHasta&&(!dFecha||dFecha>fHasta)))continue;
      const otraSesion=(fecha&&dFecha&&dFecha!==fecha)||(sesionExplicita&&sesion&&d.sesionId&&d.sesionId!==sesion);
      if(urls.length&&dUrls.some(u=>urls.includes(u)))add(r,otraSesion?'url_fuente_otra_sesion':'url_fuente');
@@ -652,6 +659,16 @@ export class EventService {
       else if(!cityConflict&&Math.min(dTitulo.length,title.length)>=12&&(dTitulo.includes(title)||title.includes(dTitulo)))add(r,'titulo_contenido');
      }
      if(!title&&city&&fecha&&dCity===city&&dFecha===fecha)add(r,'lugar_fecha');
+     const mismaCiudad=!cityClave||!dCity||municipioClave(leg(d,'city','ciudad')||(typeof d.ubicacion==='string'?d.ubicacion:d.ubicacion?.municipio)||'')===cityClave;
+     const dClave=title?claveNombre(leg(d,'titulo','nombre')):'';
+     // Título corto o parcial en la misma fecha y municipio («Zambomba» frente a «Zambomba «Arcos-Jerez»»): se avisa, sin bloquear.
+     if(title&&fecha&&dFecha===fecha&&cityClave&&mismaCiudad&&dCity&&palabras.length&&tituloClave.length>=5&&palabras.every(w=>dClave.split(' ').includes(w)))add(r,'titulo_parcial');
+     if(modo==='titulo'&&mismaCiudad&&tituloClave&&dClave){
+      if(dClave===tituloClave)add(r,'titulo');
+      else if((tituloClave.length>=6&&dClave.includes(tituloClave))||(dClave.length>=12&&tituloClave.includes(dClave)))add(r,'titulo_contenido');
+      else if(palabras.length>=2&&palabras.every(w=>dClave.split(' ').includes(w)))add(r,'titulo_parcial');
+     }
+     if(modo==='listado'&&(!cityClave||(dCity&&mismaCiudad))){filtroTotal++;if(found.size<LISTADO_MAX)add(r,'filtro');}
     }
     if(rows.length<page)break;
     cursor=rows.at(-1).id;
@@ -667,7 +684,7 @@ export class EventService {
   // Igual que la admisión: una reserva de origen cuyo evento ya no existe sigue bloqueando.
   if(huerfana)coincidencias.push(huerfana);
   const fin=new Date().toISOString(),alcance={coleccion:'eventos',filtros:{negocio:null,estado:null,zona:null,municipio:input.municipio||null,fechas:fDesde||fHasta?{desde:fDesde,hasta:fHasta}:null},incluye:['capturados','retirados','cancelados','pasados','legacy'],excluidoDeLaComparacion:omitidasPrueba?{prueba:omitidasPrueba}:{},limite,documentosEnColeccion:escaneados,composicion:estado,reservasOrigen:input.origen?'consultada':'no_aplica'};
-  return {coincidencias,informativas,escaneados,exhaustivo,...(motivoParcial?{motivoParcial}:{}),traza,alcance,barrido:{inicio,fin,intentos,catalogoEstable:!!(guardAntes&&guardAntes===guardDespues)},nota:'REGLA 2.18.0: solo es duplicado (bloquea) lo que coincide en nombre normalizado (minusculas, sin tildes ni signos), fecha, lugar (recinto y municipio) y hora (o falta en uno de los dos); ademas bloquean la reserva de origen y la identidad calculada. confianza=posible_duplicado (en informativas): nombre muy parecido con misma fecha, lugar y hora; no bloquea, revisalo. Cualquier otra señal (URL, sourceId, sesion, titulo contenido) es informativa y no bloquea. alcance describe el barrido: sin filtros, todos los documentos de eventos; el tamaño varia porque otros procesos (p. ej. la sincronizacion de Fever) añaden y borran documentos sin pasar por el MCP; traza localiza el barrido en los logs. Si exhaustivo=false (motivoParcial indica por que) hay registros sin revisar: detén la creación e informa.'};
+  return {coincidencias,informativas,modo,...(modo==='listado'?{filtroTotal,listadoTruncado:filtroTotal>LISTADO_MAX}:{}),escaneados,exhaustivo,...(motivoParcial?{motivoParcial}:{}),traza,alcance,barrido:{inicio,fin,intentos,catalogoEstable:!!(guardAntes&&guardAntes===guardDespues)},nota:'REGLA 2.18.0: solo es duplicado (bloquea) lo que coincide en nombre normalizado (minusculas, sin tildes ni signos), fecha, lugar (recinto y municipio) y hora (o falta en uno de los dos); ademas bloquean la reserva de origen y la identidad calculada. confianza=posible_duplicado (en informativas): nombre muy parecido con misma fecha, lugar y hora; no bloquea, revisalo. Cualquier otra señal (URL, sourceId, sesion, titulo contenido) es informativa y no bloquea. alcance describe el barrido: sin filtros, todos los documentos de eventos; el tamaño varia porque otros procesos (p. ej. la sincronizacion de Fever) añaden y borran documentos sin pasar por el MCP; traza localiza el barrido en los logs. Si exhaustivo=false (motivoParcial indica por que) hay registros sin revisar: detén la creación e informa.'};
  }
  async update({eventId,negocioId,expectedVersion,changes,reason,evidenciaUrl=null,simular=false},principal) {
   authorize(principal,negocioId,'edit');

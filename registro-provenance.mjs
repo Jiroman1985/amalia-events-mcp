@@ -24,8 +24,10 @@ export function registrySnapshot(row){
  if(f.id!==row.id||f.origen!=='asistente'||f.negocio_id!==null||!['activa','en_comprobacion','descubierta'].includes(f.estado))fail('registro_source_ineligible');
  if(!['web','instagram','tiktok','correo'].includes(f.canal)||typeof f.identificador!=='string'||f.id!==`fte_${f.canal}_${hash(f.identificador).slice(0,24)}`)fail('registro_source_identity_invalid');
  canonicalRegistry(f);
- if(typeof f.municipio!=='string'||!f.municipio.trim())fail('registro_source_identity_invalid');
- return {id:row.id,version:row.updateTime,canal:f.canal,identificador:f.identificador,url:f.url??null,nombreEntidad:f.nombre_entidad??null,municipio:f.municipio,estado:f.estado,origen:f.origen,negocioId:f.negocio_id};
+ // Una fuente de ámbito regional, provincial o comarcal no tiene municipio (p. ej. hayzambomba.es): basta con ALGÚN ámbito territorial (o nacional).
+ const con=k=>typeof f[k]==='string'&&f[k].trim()!=='';
+ if(!['municipio','provincia','region','comarca','zona'].some(con)&&f.ambito!=='nacional')fail('registro_source_identity_invalid',{campo:'municipio',ayuda:'La fuente no tiene ningún ámbito territorial: indica municipio, provincia, región, comarca o zona (o ambito «nacional») con actualizar_fuente.'});
+ return {id:row.id,version:row.updateTime,canal:f.canal,identificador:f.identificador,url:f.url??null,nombreEntidad:f.nombre_entidad??null,municipio:con('municipio')?f.municipio:null,...(con('provincia')?{provincia:f.provincia}:{}),...(con('region')?{region:f.region}:{}),estado:f.estado,origen:f.origen,negocioId:f.negocio_id};
 }
 /** Corte por defecto si AMALIA_FUENTES_V2_DESDE_ISO no está definida: día en que se habilitó `review` (AMALia) para la procedencia de registro. Cualquier fecha pasada vale; el corte queda en cada registro de procedencia. */
 export const REGISTRY_CUTOFF_DEFAULT='2026-11-22T00:00:00.000Z';
