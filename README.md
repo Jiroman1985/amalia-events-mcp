@@ -129,6 +129,11 @@ Ningún fallo de configuración o de plataforma deja a un agente a 0 durante hor
 | `firestore_http_403` (permisos de la cuenta de servicio) | no reintentable: error visible, no se encola |
 | `MCP_TOKEN`/credenciales ausentes | el servidor no arranca (fallo visible en el despliegue) |
 
+## 2.25.22 — buscar_duplicados_global ya no devuelve 0 en silencio; fuentes regionales
+- Sin `fechaLocal` las reglas de duplicado no podían aplicarse y la búsqueda devolvía 0 coincidencias con `exhaustivo=true` (en cualquier municipio, no solo Arcos). Ahora: con `titulo` busca por título (`titulo`, `titulo_contenido`, `titulo_parcial`); con solo municipio/city/desde/hasta lista lo que cumple los filtros (`filtro`, máx. 200, `filtroTotal`, `listadoTruncado`); todo informativo (no bloquea). Sin ningún criterio: `busqueda_vacia`. El campo `modo` dice qué se aplicó. El filtro `municipio` tolera guiones, tildes y alias. La admisión no se veía afectada (siempre lleva fechaLocal).
+- Con fecha, un título corto o parcial en el mismo municipio y día sale como `titulo_parcial` (informativo).
+- `registry` de procedencia: una fuente de ámbito regional/provincial/comarcal/nacional sin municipio (p. ej. hayzambomba.es) ya no da `registro_source_identity_invalid`; sin ningún ámbito territorial sigue rechazada, ahora con el campo y la ayuda.
+
 ## 2.24.2
 - `editar_evento` respeta `simular=true`: hace todas las validaciones (versión, evidencia, escaneo de duplicados) y devuelve `camposQueCambian`/`cambios` sin escribir. Sin `simular` aplica como siempre.
 - `rellenar_url_normalizada.mjs` (ensayo por defecto): rellena `url_normalizada` ausente en fuentes de Instagram.
