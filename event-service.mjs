@@ -7,7 +7,9 @@ import { randomUUID } from 'node:crypto';
 import { agenteCanonico } from './identidad.mjs';
 import { clasifica, MonitorPlataforma } from './plataforma.mjs';
 import { encolar, listar as listarCola, marcar as marcarCola, superaIntentos, resumenPorAgente } from './cola-admision.mjs';
-import { publicar as publicarTablon } from './tablon.mjs';
+import { publicar as publicarTablon, cerrarAlertaAuto } from './tablon.mjs';
+import { listarTareas } from './tareas.mjs';
+import { objetivos as objetivosAltas, SIN_ALTAS_MS, ERRORES_REPETIDOS_N, ERRORES_VENTANA_MS } from './ritmo.mjs';
 import { assertAltaCompleta,normSesiones,conPlazo,DomainError,assertFuentePrimaria,mergeSources,tituloSoloForma,canonicalInputExtras,canonicalInput,eventIdentity,fingerprint,record,authorize,authorizeCapture,id,fail,hash,originKey,normalizeText } from './event-domain.mjs';
 
 // Campos opcionales de ficha en candidatos privados: se validan con las mismas reglas que la admisión.
@@ -133,6 +135,62 @@ export class EventService {
     if(!simular)await this.store.write('eventos',f.id,{procedenciaRegistro:ctx.record,procedenciaPendiente:false,procedenciaPendienteMotivo:null,procedenciaPendienteDatos:null,procedenciaReconciliadaEn:now,procedenciaReconciliadaPor:agenteCanonico(principal.id)},{updateTime:f.updateTime,updateFields:['procedenciaRegistro','procedenciaPendiente','procedenciaPendienteMotivo','procedenciaPendienteDatos','procedenciaReconciliadaEn','procedenciaReconciliadaPor'],metadataOnly:true});
     out.reconciliadas++;
    }catch(e){out.bloqueadasPorDatos.push({eventId:f.id,error:e instanceof DomainError?e.code:'operation_failed'});}
+  }
+  return out;
+ }
+
+ // ---- Vigilancia de ritmo: altas por agente contra su objetivo y alertas automáticas en el tablón ----
+ async #altasVentana(desdeMs){
+  const iso=new Date(desdeMs).toISOString(),out=[];
+  const acepta=(id,x)=>{if(!x||x.retirado===true||x.prueba===true||!x.fechaCreacion)return;const t=Date.parse(x.fechaCreacion);if(Number.isFinite(t)&&t>=desdeMs)out.push({eventId:id,agente:agenteCanonico(x.agenteCanonico||x.createdBy||''),t});};
+  if(typeof this.store.queryPagina==='function'){
+   let despues=null;
+   for(let leidos=0;;){const page=await this.store.queryPagina('eventos','fechaCreacion',{desde:iso,hasta:null,despues,desc:true,limit:500});leidos+=page.length;for(const r of page)acepta(r.id,r.data);if(page.length<500||leidos>=ALTAS_MAX_LECTURAS)break;const l=page.at(-1);despues={valor:l.data.fechaCreacion,id:l.id};}
+  }else{const u=await this.catalogUniverse();for(const r of u.docs)acepta(r.id,r.data);}
+  return out;
+ }
+ async #alertasAbiertas(){
+  const filas=await this.store.list('tablon_agentes',{eq:{alerta_auto:true,estado:'abierto'},limit:200}),m=new Map();
+  for(const f of filas)if(f.data?.alerta_clave&&f.data.estado==='abierto')m.set(f.data.alerta_clave,f.id);
+  return m;
+ }
+ /** Solo lectura: altas por agente en la última hora y 24 h contra su objetivo, cola pendiente con su motivo, tareas en curso, errores recientes y alertas abiertas. */
+ async ritmoAltas(principal,{ahora=Date.now()}={}){
+  authorize(principal,null,'read');
+  const objs=objetivosAltas(),altas=await this.#altasVentana(ahora-24*3600*1000),cola=resumenPorAgente(await listarCola(this.store,{estado:'pendiente',limite:5000})),abiertas=await this.#alertasAbiertas();
+  const nombres=[...new Set([...Object.keys(objs),...altas.map(a=>a.agente).filter(Boolean),...Object.keys(cola)])].sort(),agentes=[];
+  for(const agente of nombres){
+   const mias=altas.filter(a=>a.agente===agente),h1=mias.filter(a=>a.t>=ahora-3600*1000).length,ult=mias.reduce((m,a)=>Math.max(m,a.t),0)||null,obj=objs[agente]||null;
+   const min=ult==null?null:Math.floor((ahora-ult)/60000);
+   const tareas=obj?(await listarTareas(this.store,{agente,estado:'en_curso'},this.servidor).catch(()=>({total:0}))).total:0;
+   const estado=!obj?'sin_objetivo':(min==null||min>=SIN_ALTAS_MS()/60000)?'parado':mias.length<obj.min?'por_debajo':mias.length>obj.max?'por_encima':'en_objetivo';
+   agentes.push({agente,altasUltimaHora:h1,altasUltimas24h:mias.length,ultimaAltaEn:ult?new Date(ult).toISOString():null,minutosSinAltas:min,objetivo:obj?{minimoDia:obj.min,maximoDia:obj.max,porHoraEfectiva:Math.ceil(obj.min/obj.horasEfectivas)}:null,avanceMinimoDiaPct:obj?Math.round(mias.length/Math.max(1,obj.min)*100):null,estado,colaPendiente:cola[agente]||{pendientes:0,motivos:{}},tareasEnCurso:tareas,erroresPlataforma2h:this.monitor.erroresDesde(2*3600*1000,{agente}),alertasAbiertas:[...abiertas.keys()].filter(k=>k.split(':')[1]===agente)});
+  }
+  return {generadoEn:new Date(ahora).toISOString(),ventana:'24 h (las altas retiradas y de prueba no cuentan)',sinAltasAlertaTrasMin:SIN_ALTAS_MS()/60000,agentes,colaTotalPendiente:Object.values(cola).reduce((a,c)=>a+c.pendientes,0)};
+ }
+ /** Una vuelta de vigilancia: abre (una sola por agente y asunto) y cierra solas las alertas del tablón. Alfred: agente con objetivo >2 h sin altas con cola o tareas en curso; error de config/plataforma repetido 3 veces en 15 min (esperaA inaki: es del servidor). */
+ async vigilar({ahora=Date.now()}={}){
+  const r=await this.ritmoAltas(this.servidor,{ahora}),abiertas=await this.#alertasAbiertas(),debidas=new Map();
+  for(const a of r.agentes){
+   if(a.objetivo&&a.estado==='parado'&&(a.colaPendiente.pendientes>0||a.tareasEnCurso>0)){
+    const h=a.minutosSinAltas==null?'más de 24':String(Math.floor(a.minutosSinAltas/60));
+    debidas.set('ritmo:'+a.agente,{asunto:`Ritmo: ${a.agente} lleva ${h} h sin altas`,texto:`${a.agente} tiene objetivo de ${a.objetivo.minimoDia}-${a.objetivo.maximoDia} altas/día y lleva ${h} h sin dar ninguna (${a.altasUltimas24h} en 24 h). Cola de admisión pendiente: ${a.colaPendiente.pendientes}${Object.keys(a.colaPendiente.motivos||{}).length?' ('+Object.entries(a.colaPendiente.motivos).map(([k,n])=>k+' '+n).join(', ')+')':''}; tareas en curso: ${a.tareasEnCurso}. Mira ritmo_altas y salud_admision. La alerta se cierra sola cuando vuelva a dar altas.`,servidor:false});
+   }
+  }
+  const n=ERRORES_REPETIDOS_N(),vent=ERRORES_VENTANA_MS();
+  for(const agente of this.monitor.agentesConErrores(vent))for(const codigo of this.monitor.codigosDe(agente,vent)){
+   const veces=this.monitor.repeticiones(agente,codigo,vent);
+   if(veces>=n)debidas.set(`error:${agente}:${codigo}`,{asunto:`Error repetido: ${codigo} (${agente}) ${veces} veces en ${Math.round(vent/60000)} min`,texto:`El servidor ha devuelto ${codigo} a ${agente} ${veces} veces en ${Math.round(vent/60000)} min. Es un fallo de configuración o de plataforma, no de datos: las altas quedan en la cola del servidor y se reanudan solas, pero hay que revisar la causa. Mira salud_admision. La alerta se cierra sola cuando deje de repetirse.`,servidor:true});
+  }
+  const out={abiertas:[],cerradas:[]};
+  for(const [clave,d] of debidas){
+   if(abiertas.has(clave))continue;
+   try{const p=await publicarTablon(this.store,{tipo:'ayuda',asunto:d.asunto.slice(0,120),texto:d.texto.slice(0,1900),destinatarios:['alfred'],prioridad:'urgente',...(d.servidor?{esperaA:'inaki'}:{})},this.servidor,{extra:{alerta_auto:true,alerta_clave:clave}});out.abiertas.push({clave,hilo:p.id});console.error(JSON.stringify({level:'warn',event:'alerta_abierta',clave}));}
+   catch(e){console.error(JSON.stringify({level:'warn',event:'alerta_fallida',clave,error:e?.code||'error'}));}
+  }
+  for(const [clave,id] of abiertas){
+   if(debidas.has(clave))continue;
+   try{if(await cerrarAlertaAuto(this.store,id,'Resuelta sola: la condición que la abrió ya no se da.'))out.cerradas.push({clave,hilo:id});}catch{/* se reintenta en la siguiente vuelta */}
   }
   return out;
  }

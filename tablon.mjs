@@ -52,7 +52,7 @@ function referencias(r) {
 const resumenHilo = raiz => ({ esperaA: raiz.espera_a ?? null, requiereAtencion: requiereAtencion(raiz), ...(raiz.estado === 'resuelto' ? { resueltoPor: raiz.resuelto_por ?? null, nota: raiz.nota ?? null } : {}) });
 const resumenMsg = d => ({ id: d.id, hilo: d.hilo, autor: agenteCanonico(d.autor), agente: agenteCanonico(d.agente), principal: d.principal ?? null, tipo: d.tipo, asunto: d.asunto, texto: d.texto, destinatarios: d.destinatarios, prioridad: d.prioridad, referencias: d.referencias ?? null, creadoEn: d.creado_en, esRaiz: d.es_raiz === true });
 
-export async function publicar(store, input, principal, { now = () => new Date().toISOString() } = {}) {
+export async function publicar(store, input, principal, { now = () => new Date().toISOString(), extra = {} } = {}) {
   escribir(principal); limita(principal);
   if (!TIPOS.includes(input.tipo)) fail('board_tipo_invalido', { validos: TIPOS });
   if (input.tipo === 'decision') admin(principal);
@@ -61,7 +61,7 @@ export async function publicar(store, input, principal, { now = () => new Date()
     destinatarios: destinatarios(input.destinatarios, input.tipo, A_ALFRED.has(input.tipo) ? ['alfred'] : ['todos']), prioridad: input.prioridad === 'urgente' ? 'urgente' : 'normal', estado: 'abierto', referencias: referencias(input.referencias), creado_en: now(),
     ...(input.esperaA ? { espera_a: text(input.esperaA, 2, 80, 'board_espera_a_invalido') } : {})
   };
-  d.requiere_atencion = requiereAtencion(d);
+  Object.assign(d, extra); d.requiere_atencion = requiereAtencion(d);
   await store.write(COL, id, d, { create: true });
   return { publicado: true, id, hilo: id, autor: d.autor, destinatarios: d.destinatarios, mensaje: A_ALFRED.has(d.tipo) ? 'Mensaje publicado. Alfred decide en caso de duda: espera su respuesta antes de actuar.' : 'Mensaje publicado.' };
 }
@@ -159,6 +159,12 @@ export async function autocerrar(store, { now = () => new Date().toISOString(), 
     raiz.estado = 'resuelto'; raiz.resuelto_por = 'sistema'; raiz.nota = 'autocierre'; raiz.requiere_atencion = false; cerrados.push({ hilo: id, motivo });
   }
   return cerrados;
+}
+/** Cierra una alerta automática del servidor (alerta_auto) porque ya no procede. Idempotente: una alerta ya resuelta no se toca. */
+export async function cerrarAlertaAuto(store, id, nota, { now = () => new Date().toISOString() } = {}) {
+  const fresca = await store.get(COL, id); if (!fresca || fresca.data.estado !== 'abierto' || fresca.data.alerta_auto !== true) return false;
+  try { await store.write(COL, id, { ...fresca.data, estado: 'resuelto', resuelto_por: 'sistema', resuelto_por_principal: 'sistema', resuelto_en: now(), nota: String(nota).slice(0, 300), autocierre_motivo: 'alerta_resuelta', requiere_atencion: false }, { updateTime: fresca.updateTime }); return true; }
+  catch (e) { if (e.code === 'version_conflict') return false; throw e; }
 }
 // En lecturas y marcas de lectura el autocierre es de mejor esfuerzo: un fallo nunca rompe la consulta.
 const autocerrarSeguro = async (store, hilos, now) => { try { await autocerrar(store, { now, hilos }); } catch { /* se reintenta en la siguiente lectura o barrido */ } };

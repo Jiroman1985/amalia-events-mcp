@@ -70,6 +70,19 @@ Captura: HTTPS con DNS completo validado, conexión fijada a IP validada, SNI/Ho
 
 Pruebas reproducibles: `FIRESTORE_EMULATOR_HOST=127.0.0.1:8686 AMALIA_TEST_PUBLIC_SOURCES=1 node --test --test-concurrency=1 tests/*.test.mjs`. Los tests restringen Firestore a localhost y proyectos demo. El test público recorre HTTP MCP → servicio por defecto → DNS/TLS reales con fuentes públicas y un almacén que rechaza toda escritura. Sin emulador o variable de fuentes públicas se declaran omitidos esos grupos; nunca son certificación de producción. No hacer altas de prueba en PRO.
 
+## 2.28.0 — vigilancia de ritmo y alertas automáticas
+- **`ritmo_altas`** (solo lectura): por agente, altas en la última hora y en 24 h (no cuentan retiradas ni de prueba), contra su objetivo (AMALia 100-200/día, ~10 por hora efectiva), minutos sin altas, `estado` (`en_objetivo`, `por_debajo`, `por_encima`, `parado`, `sin_objetivo`), cola de admisión pendiente con su motivo, tareas en curso, errores de plataforma de 2 h y alertas abiertas.
+- **Alertas del servidor en el tablón** (hilo `ayuda`, urgente, para Alfred; el servidor las revisa cada 5 min): (1) un agente con objetivo lleva más de 2 h sin altas y tiene cola pendiente o tareas en curso; (2) el mismo error de configuración o plataforma se repite 3 veces en 15 min en un agente (con `esperaA: "inaki"`, porque es del servidor). Una sola alerta abierta por agente y asunto (`alerta_clave`), y se cierra sola (`resuelto_por: sistema`) cuando la condición desaparece: el agente vuelve a dar altas o el error deja de repetirse. Las dudas/ayudas nunca se autocierran por lectura: solo las cierra el servidor al resolverse la causa.
+- Límite conocido: la regla de las 2 h no distingue horario laboral; un agente con tareas en curso por la noche genera alerta (se cierra sola a la mañana siguiente al dar altas). `AMALIA_ALERTA_SIN_ALTAS_MS` lo ajusta.
+
+| Variable | Defecto | Efecto |
+|---|---|---|
+| `AMALIA_VIGILANCIA_MS` | `300000` | cada cuánto el servidor revisa el ritmo y abre/cierra alertas (0 = desactivada) |
+| `AMALIA_OBJETIVOS_ALTAS` | `{"amalia":{"min":100,"max":200,"horasEfectivas":10}}` | objetivos de altas por día y agente (JSON; si no es válido se usan los de por defecto con aviso en el log) |
+| `AMALIA_ALERTA_SIN_ALTAS_MS` | `7200000` | tiempo sin altas que dispara la alerta de ritmo |
+| `AMALIA_ALERTA_ERRORES_N` | `3` | repeticiones del mismo error que disparan la alerta |
+| `AMALIA_ALERTA_ERRORES_VENTANA_MS` | `900000` | ventana de esas repeticiones |
+
 ## 2.27.0 — represado en la misma llamada, admitir_lote y alta en serie
 - **Represado en la misma llamada**: si `admitir_candidato` recibe un hash caducado se vuelve a preparar dentro de la misma llamada, SOLO si la propuesta es materialmente la misma y no hay duplicado nuevo: (a) otra alta de la misma fuente movió la versión del documento de la fuente (`registro_source_changed`) y el hash recibido es exactamente el de esos mismos campos con la versión anterior; (b) cambió el catálogo y el agente envía `huellaCampos` (la de `preparar_admision`) idéntica a la actual. Devuelve `represado:true`, `motivoRepresado` y `proposalHashFinal`. Un campo cambiado sigue dando `proposal_changed`; una coincidencia nueva sigue dando `duplicate_event_conflict`.
 - **`admitir_lote`**: hasta 25 candidatos preparados (`evento` + `proposalHash` + `huellaCampos` opcional). Cada uno es una admisión normal (escaneo indexado por fecha+municipio+fuente, commit atómico con guardia) y sale `admitido`, `omitido` (duplicado/ya existía), `encolado` (fallo de plataforma), `error` o `pendiente` (si no cabe en `AMALIA_LOTE_ADMISION_MS`; se repite solo eso). Un fallo no tumba el lote. Compatible con el límite de 55 s de la herramienta.
