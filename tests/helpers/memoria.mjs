@@ -16,11 +16,12 @@ export class MemoryStore {
   #put(key, data) { this.rows.set(key, { data: structuredClone(data), updateTime: iso(++this.seq) }); }
   async #pausa() { if (this.retardoMs) await new Promise(r => setTimeout(r, this.retardoMs)); }
   async get(c, id) { await this.#pausa(); const r = this.rows.get(c + '/' + id); return r ? { id, ...structuredClone(r) } : null; }
-  async list(c, { eq, limit } = {}) {
+  async list(c, { eq, limit, cursor } = {}) {
     await this.#pausa();
     let rows = [...this.rows].filter(([k]) => k.startsWith(c + '/') && !k.slice(c.length + 1).includes('/')).map(([k, r]) => ({ id: k.slice(c.length + 1), ...structuredClone(r) }));
     for (const [campo, v] of Object.entries(eq || {})) rows = rows.filter(r => r.data[campo] === v);
-    return rows.sort((a, b) => (a.id < b.id ? -1 : 1)).slice(0, limit || 500);
+    rows.sort((a, b) => (a.id < b.id ? -1 : 1)); if (cursor) rows = rows.filter(r => r.id > cursor);
+    return rows.slice(0, limit || 500);
   }
   async write(c, id, data, o = {}) {
     await this.#pausa(); const key = c + '/' + id, cur = this.rows.get(key);
