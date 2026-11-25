@@ -1,10 +1,13 @@
 import {clavesDeEvento,claveSesion,decidirSesion,normalizarUrl,sesionesDeEvento,setAliasDinamico,municipioClave} from './clave-sesion.mjs';
 import {encolarRevision,resumenCola} from './cola-revision.mjs';
-import {splitProvenance,prepareProvenance,provenanceProposal,assertReplayProvenance,registryCapabilities,registryCutoffConfig} from './registro-provenance.mjs';
+import {splitProvenance,prepareProvenance,provenanceProposal,assertReplayProvenance,registryCapabilities,registryCutoffConfig,cutoffValue} from './registro-provenance.mjs';
 import {ProgramAdmission} from './program-admission.mjs';
 import { claveNombre, identidadesCalculadas, escanearDuplicados, informativaPorFuente, motivoSesion, horarioImplicitoDistinto, municipioDistintoAviso, reglaDuplicado, clasificarCoincidencias } from './dedup_amalia.mjs';
 import { randomUUID } from 'node:crypto';
 import { agenteCanonico } from './identidad.mjs';
+import { clasifica, MonitorPlataforma } from './plataforma.mjs';
+import { encolar, listar as listarCola, marcar as marcarCola, superaIntentos, resumenPorAgente } from './cola-admision.mjs';
+import { publicar as publicarTablon } from './tablon.mjs';
 import { assertAltaCompleta,normSesiones,conPlazo,DomainError,assertFuentePrimaria,mergeSources,tituloSoloForma,canonicalInputExtras,canonicalInput,eventIdentity,fingerprint,record,authorize,authorizeCapture,id,fail,hash,originKey,normalizeText } from './event-domain.mjs';
 
 // Campos opcionales de ficha en candidatos privados: se validan con las mismas reglas que la admisión.
@@ -17,8 +20,9 @@ const UNIVERSE_MAX_DOCS=Number(process.env.AMALIA_UNIVERSE_MAX_DOCS||100000);
 // Lecturas máximas de listar_altas_recientes por llamada (para calcular `total`); si se alcanzan, totalExacto=false y se sigue con el cursor.
 const ALTAS_MAX_LECTURAS=Number(process.env.AMALIA_ALTAS_MAX_LECTURAS||5000);
 const UNIVERSE_TTL_MS=Number(process.env.AMALIA_UNIVERSE_TTL_MS||600000);
+const SLOW_MS=Number(process.env.AMALIA_ADMISION_LENTA_MS||10000),COLA_MS=Number(process.env.AMALIA_COLA_MS||600000),COLA_PRESUPUESTO_MS=Number(process.env.AMALIA_COLA_PRESUPUESTO_MS||40000);
 export class EventService {
- constructor(store,media,options={}) {this.clavesModo=options.claves??process.env.AMALIA_CLAVES??'off';this.store=store;this.media=media;this.programs=options.programs||new ProgramAdmission(store);this.inflight=new Map();this.outcomes=new Map();this.registryOptions={...registryCutoffConfig(options.registryCutoff),now:options.now};if(typeof store.listAll==='function'&&options.warm!==false&&this.clavesModo!=='bloquea'){const write=store.write.bind(store);store.write=async(...a)=>{const r=await write(...a);if(a[0]==='eventos'){const patched=await this.patchUniverse(a,r).catch(()=>false);if(!patched)setTimeout(()=>this.warm(),0);}return r;};setTimeout(()=>this.warm(),0);}}
+ constructor(store,media,options={}) {this.clavesModo=options.claves??process.env.AMALIA_CLAVES??'off';this.store=store;this.media=media;this.programs=options.programs||new ProgramAdmission(store);this.inflight=new Map();this.outcomes=new Map();this.registryOptions={...registryCutoffConfig(options.registryCutoff),now:options.now};this.monitor=options.monitor||new MonitorPlataforma();this.resolvePrincipal=options.resolvePrincipal||null;this.colaActiva=options.cola===true;this.plazoLlamadaMs=options.plazoLlamadaMs??Number(process.env.AMALIA_PLAZO_LLAMADA_MS||50000);if(typeof store.listAll==='function'&&options.warm!==false&&this.clavesModo!=='bloquea'){const write=store.write.bind(store);store.write=async(...a)=>{const r=await write(...a);if(a[0]==='eventos'){const patched=await this.patchUniverse(a,r).catch(()=>false);if(!patched)setTimeout(()=>this.warm(),0);}return r;};setTimeout(()=>this.warm(),0);}}
  // Precalienta la caché del catálogo tras cada commit a `eventos`, para que la siguiente preparación no espere la lectura completa.
  // Tras una escritura propia con precondición de guardia (admisión, ediciones con escaneo) nadie más ha escrito entre la guardia leída y este commit:
  // se relee SOLO ese documento y se aplica a la caché en vez de recargar los ~4.000 eventos. Cualquier otra escritura invalida la caché.
@@ -36,9 +40,101 @@ export class EventService {
  }
  // La admisión ya no necesita precargar el catálogo: consulta solo los candidatos de cada alta.
  warm(){}
- async registryContext(raw,event,principal){return prepareProvenance(this.store,raw,event,principal,{cutoff:this.registryOptions.cutoff,...(this.registryOptions.now?{now:this.registryOptions.now()}: {})});}
+ async registryContext(raw,event,principal,opts={}){return prepareProvenance(this.store,raw,event,principal,{cutoff:this.registryOptions.cutoff,degradar:true,rebind:opts.rebind===true,...(this.registryOptions.now?{now:this.registryOptions.now()}: {})});}
  async registryCapabilities(input,principal){return {...await registryCapabilities(this.store,principal,input.fuenteId,this.registryOptions.cutoff),cutoffPorDefecto:this.registryOptions.porDefecto===true};}
  // Recibo por requestId (con o sin negocioId). Si el alta sigue ejecutándose devuelve estado «en_proceso» en vez de un vacío.
+
+ // ---- Fiabilidad: errores de configuración/plataforma no dejan a un agente parado (cola persistente, degradación, salud) ----
+ /** Principal interno de las tareas de fondo (reanudar, reconciliar, vigilar). Nunca llega de fuera. */
+ get servidor(){return {id:'servidor-amalia',agente:'servidor-amalia',actions:['*'],businesses:['*']};}
+ /** Ejecuta una operación de admisión con plazo propio (menor que el de la herramienta): si falla por plataforma/config, el candidato se guarda en la cola del servidor y el agente recibe un resultado normal «encolado». */
+ async conCola(accion,original,principal,fn){
+  const op=accion==='preparar'?'preparar':'admitir',t0=Date.now(),agente=agenteCanonico(principal.id);
+  try{const r=await conPlazo(fn(),this.plazoLlamadaMs,'operation_timeout',{operacion:accion}),ms=Date.now()-t0;this.monitor.latencia(op,ms);if(ms>SLOW_MS)console.error(JSON.stringify({level:'warn',event:'admision_lenta',operacion:accion,ms}));return r;}
+  catch(e){
+   const c=clasifica(e);if(!c.reintentable)throw e;
+   this.monitor.error(agente,c.codigo,accion);
+   if(!this.colaActiva||!original||typeof original!=='object'||Array.isArray(original))throw e;
+   let q;try{q=await encolar(this.store,{principal,evento:original,motivo:c.codigo,detalle:e instanceof DomainError?{...e.details,ayuda:undefined}:null});}catch{throw e;}
+   console.error(JSON.stringify({level:'warn',event:'alta_encolada',agente,colaId:q.colaId,motivo:c.codigo,operacion:accion}));
+   return {encolado:true,estado:'encolado',colaId:q.colaId,requestId:q.requestId,motivo:c.codigo,...(accion==='preparar'?{admisible:false}:{created:false}),ayuda:`Fallo de plataforma (${c.codigo}), no de tus datos. NO esperes aviso: la alta ha quedado en la cola del servidor y se reanudará sola (cada ${Math.round(COLA_MS/60000)} min, o con reanudar_cola_admision cuando salud_admision esté operativa). Sigue preparando la siguiente.`};
+  }
+ }
+ /** Estado de cada dependencia de la admisión (solo lectura). `operativa` = se puede admitir ahora; `estado` verde/amarillo/rojo resume. */
+ async salud(principal){
+  authorize(principal,null,'read');
+  const ahora=Date.now(),cfg=this.registryOptions;let valor=null,valido=false;try{valor=cutoffValue(cfg.cutoff);valido=true;}catch{/* mal formado o ausente */}
+  const cutoff={estado:valido&&!cfg.porDefecto?'verde':'amarillo',configurado:valido,porDefecto:cfg.porDefecto===true,valor,efecto:valido?(cfg.porDefecto?'Usa el corte por defecto: define AMALIA_FUENTES_V2_DESDE_ISO.':'Procedencia de registro operativa.'):'Corte inválido: las altas con procedenciaRegistro entran SIN procedencia (procedenciaPendiente=true) hasta que se arregle.'};
+  let guardia;try{const g=await this.store.get('amalia_catalog_guard','eventos'),ok=g?.updateTime&&Number.isSafeInteger(g.data.epoch)&&g.data.epoch>=0;guardia=!ok?{estado:'rojo',error:'catalog_guard_unavailable'}:{estado:g.data.admissionPaused===true?'rojo':'verde',epoch:g.data.epoch,admissionPaused:g.data.admissionPaused===true,...(g.data.admissionPaused===true?{error:'admission_paused'}:{})};}
+  catch(e){guardia={estado:'rojo',error:clasifica(e).codigo};}
+  const uc=this.universeCache,docs=uc?uc.docs.length:null,universo={estado:this.universeLoading||(docs!=null&&docs>UNIVERSE_MAX_DOCS*0.9)?'amarillo':'verde',documentos:docs,limiteDocumentos:UNIVERSE_MAX_DOCS,cacheEdadMs:uc?ahora-uc.at:null,cargando:Boolean(this.universeLoading),ttlMs:UNIVERSE_TTL_MS,limiteCargaMs:UNIVERSE_LOAD_MS},claves={estado:['off','sombra','bloquea'].includes(this.clavesModo)?'verde':'amarillo',modo:this.clavesModo,valido:['off','sombra','bloquea'].includes(this.clavesModo)};
+  let cola={estado:'verde',pendientes:0,porAgente:{}};try{const f=await listarCola(this.store,{estado:'pendiente',limite:5000});cola={estado:f.length?'amarillo':'verde',pendientes:f.length,porAgente:resumenPorAgente(f)};}catch(e){cola={estado:'amarillo',error:clasifica(e).codigo};}
+  const err2h=this.monitor.erroresDesde(2*3600*1000),hayErr=Object.keys(err2h).length>0;
+  const estados=[cutoff.estado,guardia.estado,universo.estado,claves.estado,cola.estado,hayErr?'amarillo':'verde'];
+  return {estado:estados.includes('rojo')?'rojo':estados.includes('amarillo')?'amarillo':'verde',operativa:guardia.estado!=='rojo',generadoEn:new Date(ahora).toISOString(),dependencias:{cutoff,guardiaCatalogo:guardia,universo,modoClaves:claves},latenciaMs:{preparar:this.monitor.resumenLatencia('preparar'),admitir:this.monitor.resumenLatencia('admitir')},erroresPlataforma2h:err2h,cola,nota:'Un error de plataforma no es «espera aviso»: el servidor encola el candidato y lo reanuda solo. Consulta esta herramienta al arrancar cada tanda.'};
+ }
+ async listarCola({estado='pendiente',agente=null,limite=50}={},principal){
+  authorize(principal,null,'admit');const admin=principal.actions.includes('*')||agenteCanonico(principal.id)==='alfred';
+  const filas=await listarCola(this.store,{estado,agente:admin?agente:agenteCanonico(principal.id),limite:Math.min(Math.max(Number(limite)||50,1),200)});
+  return {total:filas.length,items:filas.map(({evento,updateTime,...f})=>({...f,evento:{titulo:evento?.titulo,fechaLocal:evento?.fechaLocal,city:evento?.city}}))};
+ }
+ #principalDe(fila,llamador){return fila.principal===llamador.id?llamador:(this.resolvePrincipal?.(fila.principal)||null);}
+ /** Representa y admite lo encolado cuando la salud lo permite. Idempotente por requestId (el alta ya creada no se duplica) y respeta el escaneo de duplicados (es la admisión normal). */
+ async reanudarCola({limite=10,agente=null,presupuestoMs=COLA_PRESUPUESTO_MS}={},principal){
+  authorize(principal,null,'admit');
+  const admin=principal.actions.includes('*')||agenteCanonico(principal.id)==='alfred',filtro=admin?agente:agenteCanonico(principal.id);
+  if(this.reanudando)return {reanudadas:0,motivo:'ya_en_curso'};
+  this.reanudando=true;
+  try{
+   const salud=await this.salud(this.servidor);
+   if(!salud.operativa)return {reanudadas:0,motivo:'salud_no_operativa',guardiaCatalogo:salud.dependencias.guardiaCatalogo};
+   const filas=await listarCola(this.store,{estado:'pendiente',agente:filtro,limite:Math.min(Math.max(Number(limite)||10,1),50)});
+   const out={revisadas:filas.length,reanudadas:0,omitidasDuplicado:0,rechazadas:0,siguenPendientes:0,resultados:[]},porAgente={},inicio=Date.now();
+   for(const f of filas){
+    if(Date.now()-inicio>presupuestoMs){out.siguenPendientes++;out.resultados.push({colaId:f.colaId,estado:'pendiente',motivo:'presupuesto_agotado'});continue;}
+    const p=this.#principalDe(f,principal),nota=(estado,extra={})=>{out.resultados.push({colaId:f.colaId,titulo:f.titulo,estado,...extra});(porAgente[f.agente]||=[]).push({estado,titulo:f.titulo,...extra});};
+    if(!p){out.siguenPendientes++;out.resultados.push({colaId:f.colaId,estado:'pendiente',motivo:'principal_desconocido'});continue;}
+    try{
+     const prep=await this.prepareAdmission({...f.evento,requestId:f.requestId},p,{rebind:true});
+     if(prep.admissionPaused){out.siguenPendientes++;out.resultados.push({colaId:f.colaId,estado:'pendiente',motivo:'admission_paused'});continue;}
+     if(!prep.admisible){await marcarCola(this.store,f,{estado:'omitida_duplicado',coincidencias:prep.coincidencias||null,resueltaEn:new Date().toISOString()});out.omitidasDuplicado++;nota('omitida_duplicado',{coincidencias:(prep.coincidencias||[]).map(c=>c.eventId).filter(Boolean)});continue;}
+     const r=await this.admitCandidate({accion:'admit',proposalHash:prep.proposalHash,evento:prep.evento},p,{rebind:true});
+     if(r.multiple&&!r.completo){await marcarCola(this.store,f,{intentos:(f.intentos||0)+1,ultimoIntentoEn:new Date().toISOString()});out.siguenPendientes++;out.resultados.push({colaId:f.colaId,estado:'pendiente',motivo:'lote_incompleto'});continue;}
+     await marcarCola(this.store,f,{estado:'reanudada',eventId:r.eventId||null,resueltaEn:new Date().toISOString(),intentos:(f.intentos||0)+1});out.reanudadas++;nota('reanudada',{eventId:r.eventId||null});
+    }catch(e){
+     const c=clasifica(e),intentos=(f.intentos||0)+1;
+     if(c.reintentable){this.monitor.error(f.agente,c.codigo,'reanudar');await marcarCola(this.store,f,{intentos,ultimoIntentoEn:new Date().toISOString(),ultimoMotivo:c.codigo,...(superaIntentos(intentos)?{estado:'bloqueada'}:{})});out.siguenPendientes++;out.resultados.push({colaId:f.colaId,estado:superaIntentos(intentos)?'bloqueada':'pendiente',motivo:c.codigo});}
+     else{await marcarCola(this.store,f,{estado:'rechazada',codigo:c.codigo,detalle:e instanceof DomainError?e.details||null:null,resueltaEn:new Date().toISOString(),intentos});out.rechazadas++;nota('rechazada',{codigo:c.codigo});}
+    }
+   }
+   await this.#avisarReanudacion(porAgente);
+   return out;
+  }finally{this.reanudando=false;}
+ }
+ /** Una nota en el tablón para cada agente afectado y para Alfred con lo reanudado (de mejor esfuerzo: nunca rompe la reanudación). */
+ async #avisarReanudacion(porAgente){
+  for(const [agente,lista] of Object.entries(porAgente)){
+   const n=k=>lista.filter(x=>x.estado===k).length,texto=`La cola de admisión del servidor ha procesado ${lista.length} alta(s) de ${agente}: ${n('reanudada')} admitidas, ${n('omitida_duplicado')} omitidas por posible duplicado, ${n('rechazada')} rechazadas por datos.`+(lista.slice(0,5).map(x=>`\n- ${x.estado}: ${x.titulo||'(sin título)'}${x.codigo?' ('+x.codigo+')':''}`).join(''));
+   try{await publicarTablon(this.store,{tipo:'aviso',asunto:`Cola de admisión: ${lista.length} alta(s) de ${agente} procesadas`,texto:texto.slice(0,1900),destinatarios:[...new Set([agente,'alfred'])],prioridad:'normal'},this.servidor);}catch(e){console.error(JSON.stringify({level:'warn',event:'aviso_cola_fallido',agente,error:e?.code||'error'}));}
+  }
+ }
+ /** Adjunta la procedencia a los eventos admitidos sin ella (procedenciaPendiente=true) cuando la configuración vuelve. Los errores de datos los dejan pendientes y se informan. */
+ async reconciliarProcedencias({limite=50,simular=false}={},principal){
+  if(!(principal.actions.includes('*')||principal.actions.includes('review')||agenteCanonico(principal.id)==='alfred'))authorize(principal,null,'review');
+  try{cutoffValue(this.registryOptions.cutoff);}catch{return {reconciliadas:0,motivo:'registro_cutoff_unconfigured',ayuda:'El corte sigue sin ser válido: define AMALIA_FUENTES_V2_DESDE_ISO (ISO 8601 con zona).'};}
+  const filas=await this.store.list('eventos',{eq:{procedenciaPendiente:true},limit:Math.min(Math.max(Number(limite)||50,1),200)});
+  const out={revisadas:filas.length,reconciliadas:0,bloqueadasPorDatos:[],simulado:simular===true},now=new Date().toISOString(),interno=this.servidor;
+  for(const f of filas){
+   const d=f.data||{};if(d.procedenciaPendiente!==true||!d.procedenciaPendienteDatos)continue;
+   try{
+    const ctx=await prepareProvenance(this.store,d.procedenciaPendienteDatos,{negocioId:d.negocioId,fuentes:d.fuentes},interno,{cutoff:this.registryOptions.cutoff,rebind:true,...(this.registryOptions.now?{now:this.registryOptions.now()}:{})});
+    if(!ctx||ctx.degradada)continue;
+    if(!simular)await this.store.write('eventos',f.id,{procedenciaRegistro:ctx.record,procedenciaPendiente:false,procedenciaPendienteMotivo:null,procedenciaPendienteDatos:null,procedenciaReconciliadaEn:now,procedenciaReconciliadaPor:agenteCanonico(principal.id)},{updateTime:f.updateTime,updateFields:['procedenciaRegistro','procedenciaPendiente','procedenciaPendienteMotivo','procedenciaPendienteDatos','procedenciaReconciliadaEn','procedenciaReconciliadaPor'],metadataOnly:true});
+    out.reconciliadas++;
+   }catch(e){out.bloqueadasPorDatos.push({eventId:f.id,error:e instanceof DomainError?e.code:'operation_failed'});}
+  }
+  return out;
+ }
  async registryAdmissionReceipt({negocioId,requestId},principal){
   if(typeof requestId!=='string'||!requestId||requestId.length>128)fail('invalid_request_id');
   if(negocioId)authorize(principal,negocioId,'read');
@@ -84,8 +180,8 @@ export class EventService {
    reserve={id:rk,...(priorRow&&!prior?{updateTime:priorRow.updateTime}:{}),data:{eventId,negocioId:e.negocioId,origen:e.origen,actor:agenteCanonico(principal.id),actorPrincipal:principal.id,at:new Date().toISOString()}};
   }
   const claves=this.clavesModo==='off'?null:await this.planClaves(eventId,null,extra.discriminadorSesion?{...e,discriminadorSesion:extra.discriminadorSesion}:e);
-  const r={...record(e,principal),...(extra.discriminadorSesion?{discriminadorSesion:extra.discriminadorSesion}:{}),...program?.record,...(registry?{procedenciaRegistro:registry.record,provenanceHash:registry.hash}:{}),creationFingerprint,requestId:input.requestId || null,...(input.confirmarOtraSesion&&!program?{confirmacionOtraSesion:{eventIds:[...new Set(input.confirmarOtraSesion.eventIds)].sort(),motivo:input.confirmarOtraSesion.motivo,evidenciaUrl:input.confirmarOtraSesion.evidenciaUrl,por:principal.id,en:new Date().toISOString()}}:{})};
-  try {await this.store.write('eventos',eventId,r,{create:true,guard,claves,verifies:[...(program?.verifies||[]),...(registry?[registry.verify]:[])],extras:program?.extras,audit:{version:1,actor:agenteCanonico(principal.id),actorPrincipal:principal.id,action:'created',at:r.fechaCreacion,after:r},request:requestKey?{id:requestKey,data:{eventId,fingerprint:requestFingerprint,actor:agenteCanonico(principal.id),actorPrincipal:principal.id,negocioId:e.negocioId,...(registry?{provenanceHash:registry.hash}: {})}}:undefined,reserve});}
+  const r={...record(e,principal),...(extra.discriminadorSesion?{discriminadorSesion:extra.discriminadorSesion}:{}),...program?.record,...(registry?(registry.degradada?{procedenciaPendiente:true,procedenciaPendienteMotivo:registry.motivo,procedenciaPendienteDatos:registry.datos,provenanceHash:registry.hash}:{procedenciaRegistro:registry.record,provenanceHash:registry.hash}):{}),creationFingerprint,requestId:input.requestId || null,...(input.confirmarOtraSesion&&!program?{confirmacionOtraSesion:{eventIds:[...new Set(input.confirmarOtraSesion.eventIds)].sort(),motivo:input.confirmarOtraSesion.motivo,evidenciaUrl:input.confirmarOtraSesion.evidenciaUrl,por:principal.id,en:new Date().toISOString()}}:{})};
+  try {await this.store.write('eventos',eventId,r,{create:true,guard,claves,verifies:[...(program?.verifies||[]),...(registry&&!registry.degradada?[registry.verify]:[])],extras:program?.extras,audit:{version:1,actor:agenteCanonico(principal.id),actorPrincipal:principal.id,action:'created',at:r.fechaCreacion,after:r},request:requestKey?{id:requestKey,data:{eventId,fingerprint:requestFingerprint,actor:agenteCanonico(principal.id),actorPrincipal:principal.id,negocioId:e.negocioId,...(registry?{provenanceHash:registry.hash}: {})}}:undefined,reserve});}
   catch(error){if(error.code==='version_conflict'){
    const now=await this.store.get('eventos',eventId);
    if(now?.data.creationFingerprint===creationFingerprint){assertReplayProvenance(now.data,registry);return {created:false,alreadyCreated:true,eventId,...now.data};}
@@ -249,10 +345,10 @@ export class EventService {
   });
   return items;
  }
- async prepareLote(items,principal){
+ async prepareLote(items,principal,opts={}){
   const sesiones=[];
   for(const it of items){
-   const p=await this.prepareAdmission(it.evento,principal);
+   const p=await this.prepareAdmission(it.evento,principal,opts);
    sesiones.push({indice:it.indice,fechaLocal:it.fechaLocal,horaLocal:it.horaLocal,eventId:p.eventId,admisible:p.admisible,proposalHash:p.proposalHash,coincidencias:p.coincidencias,informativas:p.informativas,avisos:p.avisos,_p:p});
   }
   return sesiones;
@@ -441,24 +537,24 @@ export class EventService {
   return {colaId:row.id,estado:'admitida',eventId:creada.eventId,created:creada.created};
  }
 
- async prepareAdmission(original,principal) {
+ async prepareAdmission(original,principal,opts={}) {
   original=this.aliasIdempotencia(original);
   const lote=this.sesionesLote(original);
   if(lote){
-   const ses=await this.prepareLote(lote,principal),admisibles=ses.filter(x=>x.admisible).length;
+   const ses=await this.prepareLote(lote,principal,opts),admisibles=ses.filter(x=>x.admisible).length;
    return {multiple:true,accionRequerida:'admit',sesionesTotal:ses.length,admisibles,bloqueadas:ses.length-admisibles,admisible:admisibles>0,proposalHash:hash(JSON.stringify(ses.map(x=>[x.indice,x.eventId,x.proposalHash]))),sesiones:ses.map(({_p,...x})=>x),evento:original,nota:'Cada sesión se comprueba contra duplicados por separado. Al admitir con este mismo hash se crean las admisibles y se omiten las bloqueadas (salen con su motivo). Repetir la llamada es seguro: las ya creadas no se duplican.',persistido:false};
   }
   const {content:input,raw}=splitProvenance(original);
   if(input.programa)return this.prepareProgramAdmission(original,principal);
-  const e=await this.canonicalForAdmission(input,principal),{guard:gd,scan}=await this.scanAdmisionFicha(e,input),registry=await this.registryContext(raw,e,principal);
+  const e=await this.canonicalForAdmission(input,principal),{guard:gd,scan}=await this.scanAdmisionFicha(e,input),registry=await this.registryContext(raw,e,principal,opts);
   return {accionRequerida:'admit',proposalHash:provenanceProposal(this.proposal(e,input,principal,scan),registry),huellaCampos:this.fieldPrints(e,input),eventId:eventIdentity(e),admisible:scan.coincidencias.length===0&&gd.data.admissionPaused!==true,admissionPaused:gd.data.admissionPaused===true,candidato:e,evento:registry?{...input,procedenciaRegistro:registry.input}:input,...scan,persistido:false};
  }
- async admitCandidate(args,principal) {
+ async admitCandidate(args,principal,opts={}) {
   if(args&&args.evento)args={...args,evento:this.aliasIdempotencia(args.evento)};
-  const lote=this.sesionesLote(args.evento);if(lote)return this.admitLote(args,lote,principal);
+  const lote=this.sesionesLote(args.evento);if(lote)return this.admitLote(args,lote,principal,opts);
   const rid=splitProvenance(args.evento).content?.requestId,nid=splitProvenance(args.evento).content?.negocioId,mark=rid&&typeof rid==='string'?principal.id+'\0'+rid:null;
   if(mark)this.inflight.set(mark,{negocioId:nid,desde:new Date().toISOString()});
-  try{return await this.admitCandidateInner(args,principal);}
+  try{const r=await this.admitCandidateInner(args,principal,opts);if(r?.created===true)this.monitor.alta(agenteCanonico(principal.id));return r;}
   catch(e){
    // El error de siempre (compatibilidad con los scripts) + estado explícito y un recibo consultable: «review_required» (coincidencia que exige revisión humana) o «contended» (escrituras simultáneas, repreparar).
    if(e instanceof DomainError&&['duplicate_event_conflict','admission_contended','session_key_conflict','requires_review'].includes(e.code)){
@@ -470,30 +566,30 @@ export class EventService {
   }
   finally{if(mark)this.inflight.delete(mark);}
  }
- async admitLote({accion,proposalHash,evento},items,principal){
+ async admitLote({accion,proposalHash,evento},items,principal,opts={}){
   authorize(principal,splitProvenance(evento).content.negocioId,'admit');
   if(accion!=='admit'||typeof proposalHash!=='string'||!/^[a-f0-9]{64}$/.test(proposalHash))fail('explicit_admission_required');
-  const ses=await this.prepareLote(items,principal),actual=hash(JSON.stringify(ses.map(x=>[x.indice,x.eventId,x.proposalHash])));
+  const ses=await this.prepareLote(items,principal,opts),actual=hash(JSON.stringify(ses.map(x=>[x.indice,x.eventId,x.proposalHash])));
   if(actual!==proposalHash)fail('proposal_changed',{repreparar:true,ayuda:'Algo cambió desde preparar_admision (catálogo o datos). Vuelve a preparar y usa el nuevo hash.'});
   const inicio=Date.now(),resultados=[];let creadas=0,yaExistian=0,omitidas=0,errores=0,pendientes=0;
   for(const [k,x] of ses.entries()){
    const base={indice:x.indice,fechaLocal:x.fechaLocal,horaLocal:x.horaLocal};
    if(!x.admisible){omitidas++;resultados.push({...base,estado:'omitida_duplicado',coincidencias:x.coincidencias});continue;}
    if(Date.now()-inicio>LOTE_PRESUPUESTO_MS){pendientes++;resultados.push({...base,estado:'pendiente'});continue;}
-   try{const r=await this.admitCandidate({accion:'admit',proposalHash:x.proposalHash,evento:items[k].evento},principal);
+   try{const r=await this.admitCandidate({accion:'admit',proposalHash:x.proposalHash,evento:items[k].evento},principal,opts);
     if(r.alreadyCreated){yaExistian++;resultados.push({...base,estado:'ya_existia',eventId:r.eventId});}else{creadas++;resultados.push({...base,estado:'creada',eventId:r.eventId});}}
    catch(e){errores++;resultados.push({...base,estado:'error',error:e instanceof DomainError?e.code:'operation_failed',...(e instanceof DomainError?{detalle:e.details}:{})});}
   }
   return {multiple:true,sesionesTotal:ses.length,creadas,yaExistian,omitidas,errores,pendientes,completo:pendientes===0&&errores===0,resultados,...(pendientes?{aviso:'Se agotó el tiempo de la llamada: repite la misma llamada (mismo hash); las creadas no se duplican y se continúa con las pendientes.'}:{})};
  }
- async admitCandidateInner({accion,proposalHash,evento:original},principal) {
+ async admitCandidateInner({accion,proposalHash,evento:original},principal,opts={}) {
   const {content:evento,raw}=splitProvenance(original);
   authorize(principal,evento.negocioId,'admit');
   if(accion!=='admit'||typeof proposalHash!=='string'||!/^[a-f0-9]{64}$/.test(proposalHash))fail('explicit_admission_required');
   if(evento.programa)return this.admitProgramCandidate({proposalHash,evento:original},principal);
   const input=evento,e=await this.canonicalForAdmission(input,principal),eventId=eventIdentity(e);
   for(let attempt=0;attempt<3;attempt++) {
-   const registry=await this.registryContext(raw,e,principal);
+   const registry=await this.registryContext(raw,e,principal,opts);
    const requestKey=input.requestId?'req_'+hash(principal.id+'\0'+input.negocioId+'\0'+input.requestId).slice(0,40):null;
    if(requestKey){const prior=await this.store.get('amalia_event_requests',requestKey);if(prior){if(prior.data.fingerprint!==fingerprint(input))fail('idempotency_conflict');assertReplayProvenance(prior.data,registry);return {created:false,alreadyCreated:true,...await this.get(prior.data.eventId,input.negocioId,principal)};}}
    const existing=await this.store.get('eventos',eventId);

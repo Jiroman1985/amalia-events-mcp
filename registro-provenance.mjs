@@ -1,4 +1,4 @@
-import {hash,fingerprint,fail,authorize,id,httpsUrl} from './event-domain.mjs';
+import {hash,fingerprint,fail,authorize,id,httpsUrl,DomainError} from './event-domain.mjs';
 import {queryIdentity} from './registro-fuentes.mjs';
 const keys=(o,allowed)=>{if(!o||typeof o!=='object'||Array.isArray(o)||Object.keys(o).some(k=>!allowed.includes(k)))fail('registro_provenance_invalid');};
 const text=(s,max=500)=>{if(typeof s!=='string'||!s.trim()||s.length>max||/[\u0000-\u001f\u007f]/.test(s))fail('registro_provenance_invalid');return s.trim();};
@@ -39,16 +39,21 @@ export function registryCutoffConfig(option,env=process.env.AMALIA_FUENTES_V2_DE
  return {cutoff:REGISTRY_CUTOFF_DEFAULT,porDefecto:true};
 }
 export function cutoffValue(value){try{return instant(value);}catch{fail('registro_cutoff_unconfigured');}}
-export async function prepareProvenance(store,raw,event,principal,{cutoff,now=new Date().toISOString()}={}){
+/** Códigos de CONFIGURACIÓN que, con degradar:true, no bloquean el alta: se admite sin procedencia y se marca procedenciaPendiente (reconciliar_procedencias la adjunta cuando la config vuelva). Los errores de DATOS siguen bloqueando. */
+export const PROCEDENCIA_DEGRADABLE=['registro_cutoff_unconfigured','registro_cutoff_not_reached'];
+export async function prepareProvenance(store,raw,event,principal,{cutoff,now=new Date().toISOString(),degradar=false,rebind=false}={}){
  if(raw===undefined)return null;
- authorize(principal,event.negocioId,'review');const p=normalizeProvenance(raw),at=instant(now),since=cutoffValue(cutoff);
- if(Date.parse(at)<Date.parse(since))fail('registro_cutoff_not_reached');
+ authorize(principal,event.negocioId,'review');let p=normalizeProvenance(raw);const at=instant(now);
+ let since=null,pendiente=null;
+ try{since=cutoffValue(cutoff);if(Date.parse(at)<Date.parse(since))fail('registro_cutoff_not_reached');}
+ catch(e){if(!degradar||!(e instanceof DomainError)||!PROCEDENCIA_DEGRADABLE.includes(e.code))throw e;pendiente=e.code;}
  if(Date.parse(p.evidenciaEditorial.verificadoEn)>Date.parse(at))fail('registro_provenance_future_verification');
  if(p.urlPrimaria!==event.fuentes?.[0]?.url)fail('registro_primary_mismatch');
  const row=await store.get('registro_fuentes',p.fuenteId),snapshot=registrySnapshot(row);
- if(snapshot.version!==p.fuenteVersion)fail('registro_source_changed',{repreparar:true});
+ let reenlazada=null;if(snapshot.version!==p.fuenteVersion){if(!rebind)fail('registro_source_changed',{repreparar:true});reenlazada=p.fuenteVersion;p={...p,fuenteVersion:snapshot.version};}
  if(snapshot.canal!==p.canalFuente||snapshot.identificador!==p.identificadorCanonico)fail('registro_source_identity_mismatch');
  const provenanceHash=fingerprint(p);
+ if(pendiente){console.error(JSON.stringify({level:'warn',event:'procedencia_degradada',motivo:pendiente,fuenteId:p.fuenteId,aviso:'El alta entra sin procedencia (procedenciaPendiente=true): arregla AMALIA_FUENTES_V2_DESDE_ISO o espera; reconciliar_procedencias la adjuntará.'}));return {degradada:true,motivo:pendiente,input:p,datos:p,hash:provenanceHash};}
  return {input:p,hash:provenanceHash,verify:{collection:'registro_fuentes',key:row.id,updateTime:row.updateTime},record:{policy:'authorized-editorial-registry-v1',procedencia:p,fuente:snapshot,actorServidor:principal.id,registradaEn:at,corte:since,provenanceHash}};
 }
 export function provenanceProposal(base,ctx){return ctx?fingerprint({proposal:base,provenanceHash:ctx.hash,fuenteVersion:ctx.input.fuenteVersion}):base;}

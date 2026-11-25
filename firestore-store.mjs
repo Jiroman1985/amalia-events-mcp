@@ -20,7 +20,7 @@ export function decodeValue(v) {
 }
 export const decodeFields = fields => Object.fromEntries(Object.entries(fields || {}).map(([k,v])=>[k,decodeValue(v)]));
 // Metadatos de evento que no afectan a duplicados: identidad canónica y, al fusionar fuentes, a qué fuente del registro pertenece (con su rastro).
-const METADATOS_EVENTO=new Set(['agenteCanonico','fuenteId','fuenteIdAnterior','fuenteMovidaPor','fuenteMovidaEn','fuenteMovidaMotivo','updatedBy','updatedByPrincipal','retiradoPor','retiradoPorPrincipal','recuperadoPor','recuperadoPorPrincipal']);
+const METADATOS_EVENTO=new Set(['agenteCanonico','fuenteId','fuenteIdAnterior','fuenteMovidaPor','fuenteMovidaEn','fuenteMovidaMotivo','updatedBy','updatedByPrincipal','retiradoPor','retiradoPorPrincipal','recuperadoPor','recuperadoPorPrincipal','procedenciaRegistro','provenanceHash','procedenciaPendiente','procedenciaPendienteMotivo','procedenciaPendienteDatos','procedenciaReconciliadaEn','procedenciaReconciliadaPor']);
 export class FirestoreStore {
   constructor({project,key,credentialsFile,apiBase='https://firestore.googleapis.com/v1',fetchImpl=fetch}) { this.project=project;this.key=key;this.credentials=credentialsFile ? JSON.parse(readFileSync(credentialsFile,'utf8')) : null;this.apiBase=apiBase;this.fetch=fetchImpl;this.token=null;this.tokenUntil=0;this.prefix=`projects/${project}/databases/(default)/documents`; }
   async auth() {

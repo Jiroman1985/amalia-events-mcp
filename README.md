@@ -70,6 +70,37 @@ Captura: HTTPS con DNS completo validado, conexión fijada a IP validada, SNI/Ho
 
 Pruebas reproducibles: `FIRESTORE_EMULATOR_HOST=127.0.0.1:8686 AMALIA_TEST_PUBLIC_SOURCES=1 node --test --test-concurrency=1 tests/*.test.mjs`. Los tests restringen Firestore a localhost y proyectos demo. El test público recorre HTTP MCP → servicio por defecto → DNS/TLS reales con fuentes públicas y un almacén que rechaza toda escritura. Sin emulador o variable de fuentes públicas se declaran omitidos esos grupos; nunca son certificación de producción. No hacer altas de prueba en PRO.
 
+## 2.26.0 — fiabilidad de la admisión: config degradable y cola persistente
+Ningún fallo de configuración o de plataforma deja a un agente a 0 durante horas: lo degradable se degrada con aviso y lo bloqueado se encola y se reanuda solo.
+- **Procedencia degradable**: si `procedenciaRegistro` no se puede validar por CONFIGURACIÓN (`registro_cutoff_unconfigured`, `registro_cutoff_not_reached`) el alta NO se bloquea: entra sin procedencia, con `procedenciaPendiente=true`, `procedenciaPendienteMotivo` y los datos validados en `procedenciaPendienteDatos`, y se escribe un aviso `procedencia_degradada` en el log. Los errores de DATOS (`registro_primary_mismatch`, `registro_source_identity_mismatch`, `registro_source_not_found`, `registro_provenance_invalid`, `registro_source_ineligible`…) siguen bloqueando ese evento. `reconciliar_procedencias` (y el servidor cada 10 min) adjunta la procedencia cuando el corte vuelve; si la fuente cambió de versión pero sigue siendo válida se reenlaza a la versión actual.
+- **`salud_admision`** (solo lectura): corte, guardia del catálogo, `admissionPaused`, tamaño del universo, modo de claves, latencia media/p95 de preparar y admitir, errores de plataforma de las últimas 2 h por código y cola pendiente. `operativa` = se puede admitir; `estado` verde/amarillo/rojo.
+- **Cola persistente `cola_admision`**: si `preparar_admision`/`admitir_candidato` fallan por un código reintentable (`admission_paused`, `catalog_guard_unavailable`, `operation_timeout`, `catalog_load_timeout`, `admission_contended`, `incomplete_scan`, red/5xx de Firestore) el candidato se guarda con su evento, requestId y motivo y la herramienta devuelve `encolado:true` (no un error). `reanudar_cola_admision` (y el servidor cada 10 min) vuelve a preparar y admitir lo encolado cuando la guardia está operativa: idempotente por requestId, con el escaneo de duplicados normal; un duplicado nuevo se omite. Publica una nota en el tablón para el agente afectado y para Alfred. `listar_cola_admision` la consulta.
+- Un error de plataforma **no es «espera aviso»**: está en las instrucciones del MCP y en la descripción de las herramientas.
+
+### Variables de entorno nuevas (valor por defecto)
+| Variable | Defecto | Efecto |
+|---|---|---|
+| `AMALIA_COLA` | activa (`off` la desactiva) | cola persistente y worker |
+| `AMALIA_COLA_MS` | `600000` | cada cuánto el servidor reanuda la cola y reconcilia procedencias (0 = no) |
+| `AMALIA_COLA_PRESUPUESTO_MS` | `40000` | tiempo máximo de cada pasada de reanudación |
+| `AMALIA_COLA_MAX_INTENTOS` | `20` | tras esos intentos la entrada pasa a `bloqueada` |
+| `AMALIA_PLAZO_LLAMADA_MS` | `50000` | plazo interno de preparar/admitir: vence antes que el de la herramienta (55 s) para poder encolar |
+| `AMALIA_ADMISION_LENTA_MS` | `10000` | umbral para registrar `admision_lenta` en el log |
+
+### Errores que dependen de config/entorno y su tratamiento
+| Código / variable | Tratamiento |
+|---|---|
+| `registro_cutoff_unconfigured` (`AMALIA_FUENTES_V2_DESDE_ISO` mal formada) | se degrada: alta sin procedencia + `procedenciaPendiente`; aviso en log; `salud_admision` amarillo |
+| `registro_cutoff_not_reached` (corte en el futuro) | se degrada igual |
+| variable ausente | corte por defecto `2026-11-22T00:00:00Z` + aviso (2.25.21) |
+| `catalog_guard_unavailable` | se encola; salud rojo; el worker espera |
+| `admission_paused` (decisión humana) | se encola; salud rojo; se reanuda al reabrir |
+| `operation_timeout`, `catalog_load_timeout`, `admission_contended`, `incomplete_scan`, `firestore_http_5xx/429`, red | se encolan (reintentables) |
+| `AMALIA_CLAVES` con valor desconocido | no falla; `salud_admision` lo marca amarillo (`modoClaves`) |
+| `AMALIA_UNIVERSE_MAX_DOCS` superado (`catalog_limit_exceeded`) | no reintentable; `salud_admision` avisa al 90 % |
+| `firestore_http_403` (permisos de la cuenta de servicio) | no reintentable: error visible, no se encola |
+| `MCP_TOKEN`/credenciales ausentes | el servidor no arranca (fallo visible en el despliegue) |
+
 ## 2.24.2
 - `editar_evento` respeta `simular=true`: hace todas las validaciones (versión, evidencia, escaneo de duplicados) y devuelve `camposQueCambian`/`cambios` sin escribir. Sin `simular` aplica como siempre.
 - `rellenar_url_normalizada.mjs` (ensayo por defecto): rellena `url_normalizada` ausente en fuentes de Instagram.
