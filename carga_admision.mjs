@@ -21,7 +21,7 @@ const T = ['del olivo', 'de la luna', 'del rio', 'de los caminos', 'de otoño', 
 const CIUDADES = ['Córdoba', 'Sevilla', 'Málaga', 'Granada', 'Jaén', 'Almería', 'Huelva', 'Cádiz', 'Antequera', 'Ronda', 'Úbeda', 'Baeza', 'Lucena', 'Écija', 'Osuna', 'Marbella', 'Motril', 'Guadix', 'Priego', 'Loja'];
 let contador = 0;
 const nuevo = (ag) => { const n = ++contador, d = new Date(Date.UTC(2099, 0, 1 + (n * 7) % 330)).toISOString().slice(0, 10), ciu = CIUDADES[n % CIUDADES.length]; return { negocioId: 'b', titulo: `${P[n % P.length]} ${T[(n * 3) % T.length]} de ${ciu} edición ${n}`, descripcion: `Evento de ensayo de carga número ${n}.`, city: ciu, provincia: ciu, pais: 'España', fechaLocal: d, horaLocal: `${String(10 + (n % 12)).padStart(2, '0')}:00`, timeZone: 'Europe/Madrid', sesionId: `c${n}`, fuentes: [{ url: `https://carga.example/${ag}/evento-${n}`, checkedAt: '2026-11-20T10:00:00Z' }], requestId: `carga-${ag}-${n}` }; };
-const r = { admitidos: 0, omitidos: 0, encolados: 0, errores: {}, contendidasAlAgente: 0, ms: [], represadas: 0 };
+const r = { admitidos: 0, omitidos: 0, encolados: 0, motivosEncolado: {}, errores: {}, contendidasAlAgente: 0, ms: [], represadas: 0 };
 const fin = Date.now() + MIN * 60 * 1000, p = i => ({ id: 'agente-' + i, agente: 'agente-' + i, actions: ['admit', 'read'], businesses: ['*'] });
 async function agente(i) {
   const pr = p(i);
@@ -29,10 +29,10 @@ async function agente(i) {
     const ev = nuevo(i), t0 = Date.now();
     try {
       const prep = await s.conCola('preparar', ev, pr, () => s.prepareAdmission(ev, pr));
-      if (prep.encolado) { r.encolados++; if (prep.motivo === 'admission_contended') r.contendidasAlAgente++; continue; }
+      if (prep.encolado) { r.encolados++; r.motivosEncolado[prep.motivo] = (r.motivosEncolado[prep.motivo] || 0) + 1; if (prep.motivo === 'admission_contended') r.contendidasAlAgente++; continue; }
       if (!prep.admisible) { r.omitidos++; continue; }
       const a = await s.conCola('admitir', prep.evento, pr, () => s.admitCandidate({ accion: 'admit', proposalHash: prep.proposalHash, evento: prep.evento, huellaCampos: prep.huellaCampos }, pr));
-      if (a.encolado) { r.encolados++; if (a.motivo === 'admission_contended') r.contendidasAlAgente++; } else { r.admitidos++; if (a.represado) r.represadas++; r.ms.push(Date.now() - t0); }
+      if (a.encolado) { r.encolados++; r.motivosEncolado[a.motivo] = (r.motivosEncolado[a.motivo] || 0) + 1; if (a.motivo === 'admission_contended') r.contendidasAlAgente++; } else { r.admitidos++; if (a.represado) r.represadas++; r.ms.push(Date.now() - t0); }
     } catch (e) { const c = e instanceof DomainError ? e.code : 'otro'; r.errores[c] = (r.errores[c] || 0) + 1; if (c === 'admission_contended') r.contendidasAlAgente++; }
     if (RITMO) await new Promise(res => setTimeout(res, RITMO));
   }
@@ -42,6 +42,6 @@ const ext = EXTERNO ? setInterval(async () => { try { const g = await store.get(
 const t0 = Date.now(); await Promise.all(Array.from({ length: AGENTES }, (_, i) => agente(i + 1)));
 if (ext) clearInterval(ext);
 const dur = (Date.now() - t0) / 3600000, ms = r.ms.sort((a, b) => a - b), intentos = r.admitidos + r.omitidos + r.encolados + Object.values(r.errores).reduce((a, b) => a + b, 0);
-const informe = { minutos: MIN, agentes: AGENTES, retardoMsPorOperacion: RETARDO, ritmoMs: RITMO, escritorExternoCadaMs: EXTERNO, escriturasExternas: externos, altasAdmitidas: r.admitidos, altasPorHoraTotal: Math.round(r.admitidos / dur), altasPorHoraYAgente: Math.round(r.admitidos / dur / AGENTES), omitidos: r.omitidos, encolados: r.encolados, errores: r.errores, intentosDeAlta: intentos, reintentosPorContencionDeGuardia: conflictos, tasaReintentoContencion: +(conflictos / Math.max(1, intentos)).toFixed(4), admissionContendedAlAgente: r.contendidasAlAgente, tasaAdmissionContended: +(r.contendidasAlAgente / Math.max(1, intentos)).toFixed(4), represadas: r.represadas, latenciaAltaMs: { media: Math.round(ms.reduce((a, b) => a + b, 0) / Math.max(1, ms.length)), p95: ms[Math.floor(ms.length * 0.95)] ?? null, max: ms.at(-1) ?? null }, eventosPropios: store.eventos().filter(e => !e.id.startsWith('ext_')).length };
+const informe = { minutos: MIN, agentes: AGENTES, retardoMsPorOperacion: RETARDO, ritmoMs: RITMO, escritorExternoCadaMs: EXTERNO, escriturasExternas: externos, altasAdmitidas: r.admitidos, altasPorHoraTotal: Math.round(r.admitidos / dur), altasPorHoraYAgente: Math.round(r.admitidos / dur / AGENTES), omitidos: r.omitidos, encolados: r.encolados, motivosEncolado: r.motivosEncolado, errores: r.errores, intentosDeAlta: intentos, reintentosPorContencionDeGuardia: conflictos, tasaReintentoContencion: +(conflictos / Math.max(1, intentos)).toFixed(4), admissionContendedAlAgente: r.contendidasAlAgente, tasaAdmissionContended: +(r.contendidasAlAgente / Math.max(1, intentos)).toFixed(4), represadas: r.represadas, latenciaAltaMs: { media: Math.round(ms.reduce((a, b) => a + b, 0) / Math.max(1, ms.length)), p95: ms[Math.floor(ms.length * 0.95)] ?? null, max: ms.at(-1) ?? null }, eventosPropios: store.eventos().filter(e => !e.id.startsWith('ext_')).length };
 if (salida) writeFileSync(salida, JSON.stringify(informe, null, 1));
 process.stdout.write(JSON.stringify(informe, null, 1) + '\n');
