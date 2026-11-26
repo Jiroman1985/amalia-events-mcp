@@ -271,3 +271,6 @@ Pruebas reproducibles: `FIRESTORE_EMULATOR_HOST=127.0.0.1:8686 AMALIA_TEST_PUBLI
 - Alias de municipio: tabla fija ampliada (Navarra, País Vasco, Galicia, Cataluña, Comunitat Valenciana, Baleares) sin abreviaturas ambiguas (`sanlucar`, `castellon`, `hospitalet`…) y colección `municipio_alias`: un municipio «A/B» en un evento o negocio guarda A↔B automáticamente y la clave lo lee (caché 5 min).
 - `editar_negocio` (permiso `edit`, `simular`, `expectedVersion`, motivo): nombre, dirección, sitioWeb y redes; historial en `negocios/{id}/revisiones`.
 - Temporadas: un rango de más de 31 días no genera clave por día ni del primer día: una única marca `temporada` por evento; la auditoría la compara con cualquier sesión del mismo municipio y recinto dentro del rango (título parecido).
+
+## 2.25.23
+- Corrige el corte a los 55 s de `buscar_fuente`, `registrar_fuente`, `resumen_fuentes` y el resto de herramientas del registro de fuentes: la lectura completa del registro competía con la carga del catálogo (CPU limitada) y no terminaba antes del plazo. Ahora el registro se sirve desde una copia («obsoleta mientras se revalida», hasta 10 min), se refresca por detrás, las escrituras propias se ven al instante y se precarga al arrancar.

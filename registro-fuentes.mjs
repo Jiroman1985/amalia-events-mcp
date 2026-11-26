@@ -74,7 +74,7 @@ export function canonicalSource({ canal, url, usuario, correo }) {
 const REGISTRO_TTL_MS = Number(process.env.AMALIA_REGISTRO_TTL_MS || 15000);
 const cacheRegistro = new WeakMap();
 async function leerRegistro(store) {
-  if (typeof store.listAll === 'function') { const all = await store.listAll('registro_fuentes', { max: MAX_ROWS }); return all; }
+  if (typeof store.listAll === 'function') { const all = await store.listAll('registro_fuentes', { max: MAX_ROWS, concurrency: 4 }); return all; }
   const rows = []; let cursor = null;
   for (;;) {
     const page = await store.list('registro_fuentes', { cursor, limit: 500 });
@@ -86,17 +86,38 @@ async function leerRegistro(store) {
   }
   return rows;
 }
+// Lectura con «obsoleto mientras se revalida»: una lectura completa tarda segundos (≈3.400 fichas) y compite con la carga del catálogo, así que NINGUNA consulta espera si ya hay copia.
+// Fresca REGISTRO_TTL_MS; hasta REGISTRO_OBSOLETA_MS se sirve la copia y se refresca por detrás. Las escrituras propias parchean la copia (lectura de lo escrito) y, si no se puede, la marcan caducada.
+const REGISTRO_OBSOLETA_MS = Number(process.env.AMALIA_REGISTRO_OBSOLETA_MS || 600000);
+function refrescarRegistro(store, c) {
+  if (c.carga) return c.carga;
+  const gen = c.gen;
+  const p = leerRegistro(store).then(rows => { if (c.carga === p) { c.carga = null; if (c.gen === gen) { c.rows = rows; c.at = Date.now(); } } return rows; }, e => { if (c.carga === p) c.carga = null; throw e; });
+  c.carga = p; return p;
+}
+function parchearRegistro(c, key, r) {
+  c.gen++;
+  if (!c.rows) return;
+  if (r && r.data && typeof r.data === 'object' && r.updateTime) {
+    const fila = { id: String(key), data: structuredClone(r.data), updateTime: r.updateTime }, i = c.rows.findIndex(x => x.id === fila.id);
+    if (i >= 0) c.rows[i] = fila; else c.rows.push(fila);
+  } else { c.rows = null; }
+}
 export async function readRegistry(store) {
   if (REGISTRO_TTL_MS <= 0 || typeof store?.write !== 'function') return leerRegistro(store);
   let c = cacheRegistro.get(store);
   if (!c) {
-    c = { at: 0, rows: null, carga: null }; cacheRegistro.set(store, c);
+    c = { at: 0, rows: null, carga: null, gen: 0 }; cacheRegistro.set(store, c);
     const write = store.write.bind(store);
-    store.write = async (...a) => { try { return await write(...a); } finally { if (a[0] === 'registro_fuentes') { c.rows = null; c.carga = null; } } };
+    store.write = async (...a) => {
+      try { const r = await write(...a); if (a[0] === 'registro_fuentes') parchearRegistro(c, a[1], r); return r; }
+      catch (e) { if (a[0] === 'registro_fuentes') { c.gen++; c.at = 0; } throw e; }
+    };
   }
-  if (c.rows && Date.now() - c.at < REGISTRO_TTL_MS) return structuredClone(c.rows);
-  const carga = c.carga || (c.carga = leerRegistro(store).then(rows => { if (c.carga === carga) { c.rows = rows; c.at = Date.now(); c.carga = null; } return rows; }, e => { if (c.carga === carga) c.carga = null; throw e; }));
-  return structuredClone(await carga);
+  const edad = c.rows ? Date.now() - c.at : Infinity;
+  if (edad < REGISTRO_TTL_MS) return structuredClone(c.rows);
+  if (edad < REGISTRO_OBSOLETA_MS) { refrescarRegistro(store, c).catch(() => {}); return structuredClone(c.rows); }
+  return structuredClone(await refrescarRegistro(store, c));
 }
 
 const summary = (row, motivos, confianza) => ({

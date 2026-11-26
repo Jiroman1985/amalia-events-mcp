@@ -44,13 +44,31 @@ test('una carga del catálogo colgada se abandona con error claro y la siguiente
   delete process.env.AMALIA_UNIVERSE_LOAD_MS;
 });
 
-test('readRegistry: reutiliza la lectura, devuelve copias y se invalida con una escritura propia', async () => {
+test('readRegistry: reutiliza la lectura, devuelve copias y las escrituras propias se ven al instante', async () => {
   let lecturas = 0; const docs = [{ id: 'f1', data: { a: 1 }, updateTime: '1' }];
-  const store = { async listAll() { lecturas++; return structuredClone(docs); }, async write() { return {}; } };
+  const store = { async listAll() { lecturas++; return structuredClone(docs); }, async write(c, k, data) { return { id: k, data, updateTime: '2' }; } };
   const a = await readRegistry(store); a[0].data.a = 99;
   const b = await readRegistry(store); assert.equal(lecturas, 1); assert.equal(b[0].data.a, 1);
+  await store.write('registro_fuentes', 'f1', { a: 5 }); const c = await readRegistry(store); assert.equal(lecturas, 1); assert.equal(c[0].data.a, 5);
+  await store.write('registro_fuentes', 'f2', { a: 7 }); assert.equal((await readRegistry(store)).length, 2); assert.equal(lecturas, 1);
+  await store.write('eventos', 'x', {}); await readRegistry(store); assert.equal(lecturas, 1);
+});
+
+test('readRegistry: sin copia posible tras escribir se relee; con copia caducada se sirve y se refresca por detrás', async () => {
+  let lecturas = 0, lento = null; const docs = [{ id: 'f1', data: { a: 1 }, updateTime: '1' }];
+  const store = { async listAll() { lecturas++; if (lento) await lento; return structuredClone(docs); }, async write() { return {}; } };
+  await readRegistry(store); assert.equal(lecturas, 1);
   await store.write('registro_fuentes', 'f1', {}); await readRegistry(store); assert.equal(lecturas, 2);
-  await store.write('eventos', 'x', {}); await readRegistry(store); assert.equal(lecturas, 2);
+});
+
+test('readRegistry: una lectura lenta no bloquea a quien ya tiene copia (obsoleta)', async () => {
+  const antes = process.env.AMALIA_REGISTRO_TTL_MS; process.env.AMALIA_REGISTRO_TTL_MS = '1';
+  const m = await import('../registro-fuentes.mjs?obsoleta');
+  let lecturas = 0, suelta; const lento = new Promise(r => { suelta = r; }); const docs = [{ id: 'f1', data: { a: 1 }, updateTime: '1' }];
+  const store = { async listAll() { lecturas++; if (lecturas > 1) await lento; return structuredClone(docs); }, async write() { return {}; } };
+  await m.readRegistry(store); await new Promise(r => setTimeout(r, 5));
+  const t = Date.now(); const rows = await m.readRegistry(store); assert.ok(Date.now() - t < 100); assert.equal(rows.length, 1); assert.equal(lecturas, 2);
+  suelta(); if (antes === undefined) delete process.env.AMALIA_REGISTRO_TTL_MS; else process.env.AMALIA_REGISTRO_TTL_MS = antes;
 });
 
 test('varias sesiones en una llamada: se comprueban una a una y se crean todas con un solo hash', async () => {

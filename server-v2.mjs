@@ -16,7 +16,7 @@ import { Editorial } from './editorial.mjs';
 import { KalmaExport } from './kalma-export.mjs';
 import { checkMapVisibility } from './web-visibility.mjs';
 import { conPlazo,DomainError,authorize,authorizeCapture,fail,hash,id,httpsUrl,diagnosticStage,businessReferenceUrl } from './event-domain.mjs';
-import { buscarFuente,registrarFuente,actualizarFuente,CANALES,AMBITOS } from './registro-fuentes.mjs';
+import { readRegistry,buscarFuente,registrarFuente,actualizarFuente,CANALES,AMBITOS } from './registro-fuentes.mjs';
 import { conIdentidad } from './identidad.mjs';
 import { publicarTarea,actualizarTarea,listarTareas,misTareas,resumenTareas } from './tareas.mjs';
 import { publicar,responder,listar as listarTablon,misPendientes,marcarLeido,resolver as resolverHilo,decidirHilo,barrido as barridoTablon,TIPOS as TABLON_TIPOS } from './tablon.mjs';
@@ -33,7 +33,7 @@ process.on('uncaughtException',err=>{console.error(JSON.stringify({event:'uncaug
 process.on('unhandledRejection',reason=>{console.error(JSON.stringify({event:'unhandled_rejection',code:reason?.code||null,message:String(reason?.message||reason).slice(0,200)}));});
 
 
-export const VERSION='2.25.22';
+export const VERSION='2.25.23';
 const ID=z.string().regex(/^[A-Za-z0-9_-]{1,128}$/),BUSINESS={negocioId:ID},EVENT={...BUSINESS,eventId:ID},PIECE={...BUSINESS,pieceId:ID};
 const RIGHTS=z.object({status:z.enum(['unknown','owned','licensed','permission','public_domain']),evidence:z.string().max(2000).optional(),credit:z.string().max(500).optional()});
 const SOURCE=z.object({url:z.string().url(),checkedAt:z.string().datetime({offset:true}).nullable().optional(),sourceId:z.string().max(300).optional()});
@@ -203,7 +203,7 @@ export async function boot(){
  if(!env.GOOGLE_APPLICATION_CREDENTIALS)throw new Error('Backend credential required');
  await store.auth();await store.get('eventos','_amalia_read_permission_probe');
  const cloud=env.MEDIA_BUCKET?new CloudMedia({bucket:env.MEDIA_BUCKET,auth:()=>store.auth()}):null;
- const media=new MediaStore({directory:join(directory,'media'),db,publicBase,cloud,store}),events=new EventService(store,media);
+ const media=new MediaStore({directory:join(directory,'media'),db,publicBase,cloud,store}),events=new EventService(store,media);readRegistry(store).catch(()=>{});
  await media.restore();
  const config=env.PUBLISHING_CONFIG ? JSON.parse(readFileSync(env.PUBLISHING_CONFIG,'utf8')) : {accounts:[],paused:true};
  const editorial=new Editorial({db,events,media,accounts:config.accounts||[],publicBase,paused:config.paused!==false,autonomy:{businesses:config.autonomy?.businesses||[]}});editorial.recover();
