@@ -11,7 +11,7 @@
 // parcial o "corto" NO prueba ausencia de duplicados. exhaustivo=true solo certifica que se
 // escaneó todo lo entregado; la completitud de lo entregado es responsabilidad del llamador.
 //
-// Uso: escanearDuplicados(candidato, docs, {limite=5000, reservas=[]})
+// Uso: escanearDuplicados(candidato, docs, {limite=100000, reservas=[]})
 //   candidato: {negocioId, titulo, city, fechaLocal, horaLocal?, sesionId?, fuentes:[{url,sourceId?}], origen?{proveedor,id_externo,id_sesion}}
 //   docs: array de docs Firestore ya decodificados (forma canónica MCP o legacy: nombre/ciudad/fecha_inicio/enlace_original/ubicacion)
 //   reservas: docs de amalia_event_reservations (opcional; aportan motivo reserva_origen_exacta)
@@ -129,7 +129,7 @@ export function identidadesCalculadas(candidato) {
  const candidates=[{...common,sesionId:sesion||`${fecha}/`,sesionExplicita:!!sesion,horaLocal:null},{...common,sesionId:sesion||`${fecha}/sin-hora`,sesionExplicita:candidato.sesionExplicita ?? !!sesion,horaLocal:candidato.horaLocal||null}];
  return [...new Set(candidates.map(eventIdentity))];
 }
-export function escanearDuplicados(candidato, docs, {limite=5000, reservas=[]}={}) {
+export function escanearDuplicados(candidato, docs, {limite=100000, reservas=[]}={}) {
  const urls=(candidato.fuentes||[]).map(s=>String(s.url)).filter(Boolean);
  const sourceIds=(candidato.fuentes||[]).map(s=>s.sourceId).filter(Boolean).map(String);
  const title=candidato.titulo?normalizeText(candidato.titulo):null, city=candidato.city?normalizeText(candidato.city):null;

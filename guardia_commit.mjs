@@ -11,7 +11,7 @@
 //
 // Flujo bidireccional obligatorio para writers que CREAN o tocan campos del escaneo (casos A/B):
 //   1. GET amalia_catalog_guard/eventos -> {updateTime, epoch}
-//   2. Escaneo exhaustivo con dedup_amalia.mjs (tope 5000; exhaustivo=false => abortar e informar)
+//   2. Escaneo exhaustivo con dedup_amalia.mjs (sin el antiguo tope de 5000; exhaustivo=false => abortar e informar)
 //   3. Sin conflictos -> UN commit: writes = [...tusWrites, buildGuardWrite(prefix,{updateTime,epoch})]
 //   4. commit FAILED_PRECONDITION/404/ABORTED -> reintentar desde el paso 1, máx. 3 intentos;
 //      agotados -> abortar ruidosamente (fail-closed), nunca escribir a ciegas.
