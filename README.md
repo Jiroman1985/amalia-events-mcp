@@ -274,3 +274,9 @@ Pruebas reproducibles: `FIRESTORE_EMULATOR_HOST=127.0.0.1:8686 AMALIA_TEST_PUBLI
 
 ## 2.25.23
 - Corrige el corte a los 55 s de `buscar_fuente`, `registrar_fuente`, `resumen_fuentes` y el resto de herramientas del registro de fuentes: la lectura completa del registro competía con la carga del catálogo (CPU limitada) y no terminaba antes del plazo. Ahora el registro se sirve desde una copia («obsoleta mientras se revalida», hasta 10 min), se refresca por detrás, las escrituras propias se ven al instante y se precarga al arrancar.
+
+## 2.25.24
+- `buscar_duplicados_global` vuelve a ser exhaustivo con más de 5.000 eventos. Causa: `limite` admitía como máximo 5000 y algunos agentes lo enviaban; el servidor no tenía ese tope (`AMALIA_UNIVERSE_MAX_DOCS` sin definir = 100.000). Ahora `limite` admite hasta ese valor, el valor exacto 5000 se trata como «todo» y `limite_alcanzado` solo aparece si quedan documentos.
+- El barrido lee solo los campos que usan las reglas (menos de la mitad de tiempo) y tiene plazo propio (`AMALIA_DUP_PLAZO_MS`, 45 s): `motivoParcial=plazo_agotado`.
+- Salida: se añaden `estrategia`, `ms`, `alcance.estrategia` y `alcance.consultas` (ruta indexada).
+- Ruta indexada (APAGADA por defecto). Firestore no puede consultar `fuentes[].url`, así que necesita los campos derivados `urlsFuente`/`sourceIdsFuente`. Activación: 1) confirmar que todo escritor externo de `eventos` que ponga `fuentes` escribe esos campos; 2) desplegar con `AMALIA_DUP_INDEXADO=1`; 3) `node rellenar_urls_fuente.mjs` (ensayo) y `--aplicar`, que deja la marca `amalia_catalog_guard/indice_urls`. Sin la marca se usa el barrido. No necesita índices compuestos.

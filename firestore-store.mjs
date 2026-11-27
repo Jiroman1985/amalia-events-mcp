@@ -20,9 +20,11 @@ export function decodeValue(v) {
 }
 export const decodeFields = fields => Object.fromEntries(Object.entries(fields || {}).map(([k,v])=>[k,decodeValue(v)]));
 // Metadatos de evento que no afectan a duplicados: identidad canónica y, al fusionar fuentes, a qué fuente del registro pertenece (con su rastro).
-const METADATOS_EVENTO=new Set(['agenteCanonico','fuenteId','fuenteIdAnterior','fuenteMovidaPor','fuenteMovidaEn','fuenteMovidaMotivo','updatedBy','updatedByPrincipal','retiradoPor','retiradoPorPrincipal','recuperadoPor','recuperadoPorPrincipal']);
+const METADATOS_EVENTO=new Set(['agenteCanonico','fuenteId','fuenteIdAnterior','fuenteMovidaPor','fuenteMovidaEn','fuenteMovidaMotivo','updatedBy','updatedByPrincipal','retiradoPor','retiradoPorPrincipal','recuperadoPor','recuperadoPorPrincipal','urlsFuente','sourceIdsFuente']);
+// Campos derivados de `fuentes`: Firestore no puede consultar fuentes[].url dentro de un array de mapas; con estos dos sí (array-contains).
+export const camposIndiceFuentes=d=>({urlsFuente:[...new Set((d.fuentes||[]).map(s=>s?.url).filter(Boolean).map(String))],sourceIdsFuente:[...new Set((d.fuentes||[]).map(s=>s?.sourceId).filter(Boolean).map(String))]});
 export class FirestoreStore {
-  constructor({project,key,credentialsFile,apiBase='https://firestore.googleapis.com/v1',fetchImpl=fetch}) { this.project=project;this.key=key;this.credentials=credentialsFile ? JSON.parse(readFileSync(credentialsFile,'utf8')) : null;this.apiBase=apiBase;this.fetch=fetchImpl;this.token=null;this.tokenUntil=0;this.prefix=`projects/${project}/databases/(default)/documents`; }
+  constructor({project,key,credentialsFile,apiBase='https://firestore.googleapis.com/v1',fetchImpl=fetch,indiceUrls=process.env.AMALIA_DUP_INDEXADO==='1'}) { this.indiceUrls=indiceUrls;this.project=project;this.key=key;this.credentials=credentialsFile ? JSON.parse(readFileSync(credentialsFile,'utf8')) : null;this.apiBase=apiBase;this.fetch=fetchImpl;this.token=null;this.tokenUntil=0;this.prefix=`projects/${project}/databases/(default)/documents`; }
   async auth() {
     if (!this.credentials) return {};
     if (Date.now()<this.tokenUntil) return {authorization:`Bearer ${this.token}`};
@@ -42,14 +44,17 @@ export class FirestoreStore {
     return r.json();
   }
   async get(collection,key) { const d=await this.request(`/${collection}/${id(key)}`);return d?{id:key,data:decodeFields(d.fields),updateTime:d.updateTime}:null; }
-  async list(collection,{business,cursor,limit=50,name,city,estado,endAt,requestId,eq}={}) {
+  async list(collection,{business,cursor,limit=50,name,city,estado,endAt,requestId,eq,contiene,fields}={}) {
     const filters=[];
     for(const [campo,valor] of Object.entries(eq||{})){if(!/^[A-Za-z_][A-Za-z0-9_]*$/.test(campo))fail('invalid_field',{campo});filters.push({fieldFilter:{field:{fieldPath:campo},op:'EQUAL',value:{stringValue:String(valor)}}});}if(business)filters.push({fieldFilter:{field:{fieldPath:'negocioId'},op:'EQUAL',value:{stringValue:business}}});
     if(name)filters.push({fieldFilter:{field:{fieldPath:'nombre'},op:'EQUAL',value:{stringValue:name}}});
     if(requestId)filters.push({fieldFilter:{field:{fieldPath:'requestId'},op:'EQUAL',value:{stringValue:requestId}}});
     if(estado)filters.push({fieldFilter:{field:{fieldPath:'estado'},op:'EQUAL',value:{stringValue:estado}}});
     if(city)filters.push({fieldFilter:{field:{fieldPath:'city'},op:'EQUAL',value:{stringValue:city}}});
+    for(const [campo,valor] of Object.entries(contiene||{})){if(!/^[A-Za-z_][A-Za-z0-9_]*$/.test(campo))fail('invalid_field',{campo});filters.push({fieldFilter:{field:{fieldPath:campo},op:'ARRAY_CONTAINS',value:{stringValue:String(valor)}}});}
     const query={from:[{collectionId:collection}],orderBy:[{field:{fieldPath:'__name__'},direction:'ASCENDING'}],limit};
+    // Proyección: solo los campos pedidos (el barrido de duplicados no necesita descripciones ni imágenes).
+    if(fields)query.select={fields:fields.map(fieldPath=>({fieldPath}))};
     if(filters.length)query.where=filters.length===1?filters[0]:{compositeFilter:{op:'AND',filters}};
     if(cursor)query.startAt={values:[{referenceValue:`${this.prefix}/${collection}/${id(cursor)}`}],before:false};
     if(endAt)query.endAt={values:[{referenceValue:`${this.prefix}/${collection}/${id(endAt)}`}],before:false};
@@ -114,7 +119,8 @@ export class FirestoreStore {
   async writeMany(items,{guard,claves}={}) {
     if(!Array.isArray(items)||!items.length)fail('invalid_field',{campo:'items'});
     const writes=[],mask=fs=>({fieldPaths:fs.map(k=>/^[A-Za-z_][A-Za-z0-9_]*$/.test(k)?k:'`'+k.replaceAll('\\','\\\\').replaceAll('`','\\`')+'`')});
-    for(const it of items){
+    for(let it of items){
+      if(this.indiceUrls&&it.updateFields.includes('fuentes'))it={...it,data:{...it.data,...camposIndiceFuentes(it.data)},updateFields:[...new Set([...it.updateFields,'urlsFuente','sourceIdsFuente'])]};
       writes.push({update:{name:`${this.prefix}/eventos/${id(it.key)}`,fields:toFirestoreFields(it.data)},updateMask:mask(it.updateFields),currentDocument:{updateTime:it.updateTime}});
       if(it.audit)writes.push({update:{name:`${this.prefix}/eventos/${id(it.key)}/revisiones/v${String(it.data.version).padStart(8,'0')}`,fields:toFirestoreFields(it.audit)},currentDocument:{exists:false}});
     }
@@ -128,6 +134,7 @@ export class FirestoreStore {
     // Excepción acotada a la invariante «todo commit de eventos mueve la guardia»: metadatos de auditoría que no afectan a duplicados (solo agenteCanonico, sobre un documento existente).
     if(metadataOnly&&!(collection==='eventos'&&!create&&Array.isArray(updateFields)&&updateFields.length>0&&updateFields.every(f=>METADATOS_EVENTO.has(f))))fail('metadata_write_forbidden');
     if(collection==='eventos'&&create&&!guard?.updateTime)fail('admission_guard_required');
+    if(collection==='eventos'&&this.indiceUrls&&!metadataOnly&&(updateFields?updateFields.includes('fuentes'):Array.isArray(data.fuentes))){data={...data,...camposIndiceFuentes(data)};if(updateFields)updateFields=[...new Set([...updateFields,'urlsFuente','sourceIdsFuente'])];}
     const writes=[{update:{name:`${this.prefix}/${collection}/${id(key)}`,fields:toFirestoreFields(data)},currentDocument:create?{exists:false}:{updateTime}}];
     if(updateFields)writes[0].updateMask={fieldPaths:updateFields.map(k=>/^[A-Za-z_][A-Za-z0-9_]*$/.test(k)?k:'`'+k.replaceAll('\\','\\\\').replaceAll('`','\\`')+'`')};
     if(audit)writes.push({update:{name:`${this.prefix}/${collection}/${id(key)}/revisiones/v${String(data.version).padStart(8,'0')}`,fields:toFirestoreFields(audit)},currentDocument:{exists:false}});

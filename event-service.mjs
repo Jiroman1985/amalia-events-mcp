@@ -13,12 +13,18 @@ const leg=(d,k,...alt)=>{for(const key of [k,...alt]){if(d[key]!=null)return d[k
 const LOTE_PRESUPUESTO_MS=Number(process.env.AMALIA_LOTE_PRESUPUESTO_MS||38000);
 const UNIVERSE_LOAD_MS=Number(process.env.AMALIA_UNIVERSE_LOAD_MS||40000);
 // Tope de seguridad SOLO para las herramientas que recorren todo el catálogo (buscar_duplicados_global, programas); la admisión ya no lo usa.
-const UNIVERSE_MAX_DOCS=Number(process.env.AMALIA_UNIVERSE_MAX_DOCS||100000);
+export const UNIVERSE_MAX_DOCS=Number(process.env.AMALIA_UNIVERSE_MAX_DOCS||100000);
 // Lecturas máximas de listar_altas_recientes por llamada (para calcular `total`); si se alcanzan, totalExacto=false y se sigue con el cursor.
 const ALTAS_MAX_LECTURAS=Number(process.env.AMALIA_ALTAS_MAX_LECTURAS||5000);
 const UNIVERSE_TTL_MS=Number(process.env.AMALIA_UNIVERSE_TTL_MS||600000);
+// buscar_duplicados_global: plazo propio por debajo del de la herramienta (55 s), para responder «parcial» en vez de cortar.
+const DUP_PLAZO_MS=Number(process.env.AMALIA_DUP_PLAZO_MS||45000);
+// Campos que leen las reglas de duplicado y el resumen de cada coincidencia. Si una regla pasa a leer otro campo, hay que añadirlo aquí.
+export const CAMPOS_DUPLICADOS=['negocioId','titulo','nombre','city','ciudad','ubicacion','lugar','recinto','venue','fechaLocal','fecha_inicio','dateTime','horaLocal','hora','horarioTexto','sesionId','sesionExplicita','fuentes','link','enlace_original','prueba','retirado','verificationStatus','estado','version','createdBy','fechaCreacion'];
+// `limite` admitía como máximo 5000 y hay clientes que lo envían queriendo decir «todo»: ese valor exacto ya no recorta.
+const LIMITE_ANTIGUO_MAXIMO=5000;
 export class EventService {
- constructor(store,media,options={}) {this.clavesModo=options.claves??process.env.AMALIA_CLAVES??'off';this.store=store;this.media=media;this.programs=options.programs||new ProgramAdmission(store);this.inflight=new Map();this.outcomes=new Map();this.registryOptions={...registryCutoffConfig(options.registryCutoff),now:options.now};if(typeof store.listAll==='function'&&options.warm!==false&&this.clavesModo!=='bloquea'){const write=store.write.bind(store);store.write=async(...a)=>{const r=await write(...a);if(a[0]==='eventos'){const patched=await this.patchUniverse(a,r).catch(()=>false);if(!patched)setTimeout(()=>this.warm(),0);}return r;};setTimeout(()=>this.warm(),0);}}
+ constructor(store,media,options={}) {this.dupPlazoMs=options.dupPlazoMs??DUP_PLAZO_MS;this.dupIndexado=options.dupIndexado??process.env.AMALIA_DUP_INDEXADO==='1';this.clavesModo=options.claves??process.env.AMALIA_CLAVES??'off';this.store=store;this.media=media;this.programs=options.programs||new ProgramAdmission(store);this.inflight=new Map();this.outcomes=new Map();this.registryOptions={...registryCutoffConfig(options.registryCutoff),now:options.now};if(typeof store.listAll==='function'&&options.warm!==false&&this.clavesModo!=='bloquea'){const write=store.write.bind(store);store.write=async(...a)=>{const r=await write(...a);if(a[0]==='eventos'){const patched=await this.patchUniverse(a,r).catch(()=>false);if(!patched)setTimeout(()=>this.warm(),0);}return r;};setTimeout(()=>this.warm(),0);}}
  // Precalienta la caché del catálogo tras cada commit a `eventos`, para que la siguiente preparación no espere la lectura completa.
  // Tras una escritura propia con precondición de guardia (admisión, ediciones con escaneo) nadie más ha escrito entre la guardia leída y este commit:
  // se relee SOLO ese documento y se aplica a la caché en vez de recargar los ~4.000 eventos. Cualquier otra escritura invalida la caché.
@@ -626,28 +632,23 @@ export class EventService {
    const candidates=[{...common,sesionId:supplied||`${fecha}/`,sesionExplicita:!!supplied,horaLocal:null},{...common,sesionId:sesion||`${fecha}/sin-hora`,sesionExplicita,horaLocal:input.horaLocal||null}];
    for(const guessed of new Set(candidates.map(eventIdentity))){const hit=await this.store.get('eventos',guessed);if(hit)add(hit,'identidad_calculada');}
   }
-  const limite=Math.min(Math.max(input.limite||UNIVERSE_MAX_DOCS,100),UNIVERSE_MAX_DOCS);
-  const traza=randomUUID(),inicio=new Date().toISOString(),base=[...found].map(([k,v])=>[k,{row:v.row,motivos:[...v.motivos]}]);
+  const pedido=input.limite===LIMITE_ANTIGUO_MAXIMO?null:input.limite;
+  const limite=Math.min(Math.max(pedido||UNIVERSE_MAX_DOCS,100),UNIVERSE_MAX_DOCS);
+  const traza=randomUUID(),inicio=new Date().toISOString(),t0=Date.now(),finPlazo=t0+this.dupPlazoMs,base=[...found].map(([k,v])=>[k,{row:v.row,motivos:[...v.motivos]}]);
   const candRegla={titulo:input.titulo||null,city:input.city||null,lugar:input.lugar||null,fechaLocal:fecha,horaLocal:input.horaLocal||null};
   const guardUpdate=async()=>{try{return (await this.store.get('amalia_catalog_guard','eventos'))?.updateTime||null;}catch{return null;}};
-  let escaneados=0,exhaustivo=true,motivoParcial=null,intentos=0,guardAntes=null,guardDespues=null,estado={},omitidasPrueba=0;
-  // Barrido paginado por id. Si el catálogo cambia mientras se lee (otra admisión o edición), un documento nuevo podría quedar detrás del cursor: se repite el barrido; si sigue cambiando, el resultado se marca NO exhaustivo.
-  for(intentos=1;intentos<=3;intentos++){
-   found=new Map(base.map(([k,v])=>[k,{row:v.row,motivos:[...v.motivos]}]));filtroTotal=0;
-   let cursor=null;escaneados=0;exhaustivo=true;motivoParcial=null;estado={retirados:0,prueba:0,cancelados:0,vigentes:0};omitidasPrueba=0;
-   guardAntes=await guardUpdate();
-   while(escaneados<limite){
-    const page=Math.min(500,limite-escaneados),rows=await this.store.list('eventos',{cursor,limit:page});
-    for(const r of rows){
+  let escaneados=0,exhaustivo=true,motivoParcial=null,intentos=0,guardAntes=null,guardDespues=null,estado={},omitidasPrueba=0,consultas=[];
+  // Evaluación de UN documento: la misma para el barrido y para la ruta indexada.
+  const evaluar=r=>{
      escaneados++;const d=r.data;
      if(d.prueba===true)estado.prueba++;else if(d.retirado===true)estado.retirados++;else if(d.verificationStatus==='cancelado'||/cancel/i.test(String(d.estado||'')))estado.cancelados++;else estado.vigentes++;
-     if(d.prueba===true&&!String(input.titulo||'').startsWith('[PRUEBA]')){omitidasPrueba++;continue;}
+     if(d.prueba===true&&!String(input.titulo||'').startsWith('[PRUEBA]')){omitidasPrueba++;return;}
      const dUrls=[...(d.fuentes||[]).map(s=>s.url),d.link,d.enlace_original].filter(Boolean);
      const dSourceIds=(d.fuentes||[]).map(s=>s.sourceId).filter(Boolean);
      const dTitulo=normalizeText(leg(d,'titulo','nombre')),dCity=normalizeText(leg(d,'city','ciudad')||(typeof d.ubicacion==='string'?d.ubicacion:d.ubicacion?.municipio));
      const dFecha=leg(d,'fechaLocal','fecha_inicio')||d.dateTime?.slice(0,10)||null;
-     if(fMun&&dCity!==fMun&&municipioClave(leg(d,'city','ciudad')||(typeof d.ubicacion==='string'?d.ubicacion:d.ubicacion?.municipio)||'')!==fMunClave)continue;
-     if((fDesde&&(!dFecha||dFecha<fDesde))||(fHasta&&(!dFecha||dFecha>fHasta)))continue;
+     if(fMun&&dCity!==fMun&&municipioClave(leg(d,'city','ciudad')||(typeof d.ubicacion==='string'?d.ubicacion:d.ubicacion?.municipio)||'')!==fMunClave)return;
+     if((fDesde&&(!dFecha||dFecha<fDesde))||(fHasta&&(!dFecha||dFecha>fHasta)))return;
      const otraSesion=(fecha&&dFecha&&dFecha!==fecha)||(sesionExplicita&&sesion&&d.sesionId&&d.sesionId!==sesion);
      if(urls.length&&dUrls.some(u=>urls.includes(u)))add(r,otraSesion?'url_fuente_otra_sesion':'url_fuente');
      if(sourceIds.length&&dSourceIds.some(s=>sourceIds.includes(s)))add(r,otraSesion?'source_id_otra_sesion':'source_id');
@@ -669,22 +670,58 @@ export class EventService {
       else if(palabras.length>=2&&palabras.every(w=>dClave.split(' ').includes(w)))add(r,'titulo_parcial');
      }
      if(modo==='listado'&&(!cityClave||(dCity&&mismaCiudad))){filtroTotal++;if(found.size<LISTADO_MAX)add(r,'filtro');}
-    }
-    if(rows.length<page)break;
+  };
+  // Cada lectura respeta el plazo de la llamada: al agotarse se informa parcial, nunca exhaustivo.
+  const leer=promesa=>conPlazo(promesa,Math.max(1,finPlazo-Date.now()),'plazo_agotado');
+  const barrer=async()=>{
+   let cursor=null;
+   while(escaneados<limite){
+    if(Date.now()>=finPlazo)fail('plazo_agotado');
+    const page=Math.min(500,limite-escaneados),rows=await leer(this.store.list('eventos',{cursor,limit:page,fields:CAMPOS_DUPLICADOS}));
+    for(const r of rows)evaluar(r);
+    if(rows.length<page)return;
     cursor=rows.at(-1).id;
-    if(escaneados>=limite){exhaustivo=false;motivoParcial='limite_alcanzado';}
+    // Al tocar el tope solo es parcial si de verdad quedan documentos.
+    if(escaneados>=limite&&(await leer(this.store.list('eventos',{cursor,limit:2,fields:['negocioId']}))).some(r=>r.id>cursor)){exhaustivo=false;motivoParcial='limite_alcanzado';}
    }
+  };
+  // Ruta indexada: solo consultas por igualdad o rango sobre un campo. Cubre todo lo que las reglas pueden señalar: misma fecha efectiva (fechaLocal, legacy fecha_inicio o dateTime), URL, sourceId y sesión.
+  const indexar=async()=>{
+   const vistos=new Map(),anotar=(consulta,rows)=>{consultas.push({consulta,documentos:rows.length});for(const r of rows)if(!vistos.has(r.id))vistos.set(r.id,r);};
+   const todas=async(consulta,filtro)=>{const out=[];let cursor=null;for(;;){const page=await leer(this.store.list('eventos',{...filtro,cursor,limit:500,fields:CAMPOS_DUPLICADOS}));out.push(...page);if(page.length<500)break;cursor=page.at(-1).id;}anotar(consulta,out);};
+   const tareas=[todas('fechaLocal',{eq:{fechaLocal:fecha}}),todas('fecha_inicio',{eq:{fecha_inicio:fecha}}),leer(this.store.queryRango('eventos','dateTime',fecha,fecha+'\uf8ff')).then(rows=>anotar('dateTime',rows))];
+   for(const u of new Set(urls))tareas.push(todas('link',{eq:{link:u}}),todas('enlace_original',{eq:{enlace_original:u}}),todas('urlsFuente',{contiene:{urlsFuente:u}}));
+   for(const x of new Set(sourceIds))tareas.push(todas('sourceIdsFuente',{contiene:{sourceIdsFuente:x}}));
+   if(sesion)tareas.push(todas('sesionId',{eq:{sesionId:sesion}}));
+   await Promise.all(tareas);
+   consultas.sort((a,b)=>a.consulta.localeCompare(b.consulta));
+   for(const id of [...vistos.keys()].sort())evaluar(vistos.get(id));
+  };
+  // La ruta indexada exige que TODOS los eventos tengan urlsFuente/sourceIdsFuente: lo certifica la marca que deja rellenar_urls_fuente.mjs.
+  let estrategia='barrido';
+  if(this.dupIndexado&&modo==='duplicado'&&fecha&&(city||fMun)&&typeof this.store.queryRango==='function'){
+   const marca=await this.store.get('amalia_catalog_guard','indice_urls').catch(()=>null);
+   if(marca?.data?.completo===true)estrategia='indexada';
+  }
+  // Si el catálogo cambia mientras se lee (otra admisión o edición), un documento nuevo podría quedar detrás del cursor: se repite la lectura; si sigue cambiando, el resultado se marca NO exhaustivo.
+  for(intentos=1;intentos<=3;intentos++){
+   found=new Map(base.map(([k,v])=>[k,{row:v.row,motivos:[...v.motivos]}]));filtroTotal=0;
+   escaneados=0;exhaustivo=true;motivoParcial=null;estado={retirados:0,prueba:0,cancelados:0,vigentes:0};omitidasPrueba=0;consultas=[];
+   const tIntento=Date.now();
+   guardAntes=await guardUpdate();
+   try{await (estrategia==='indexada'?indexar():barrer());}
+   catch(e){if(e.code!=='plazo_agotado')throw e;exhaustivo=false;motivoParcial='plazo_agotado';}
    guardDespues=await guardUpdate();
    if(!exhaustivo||!(guardAntes&&guardDespues&&guardAntes!==guardDespues))break;
-   if(intentos===3){exhaustivo=false;motivoParcial='catalogo_modificado_durante_lectura';}
+   if(intentos===3||Date.now()+(Date.now()-tIntento)>=finPlazo){exhaustivo=false;motivoParcial='catalogo_modificado_durante_lectura';break;}
   }
   if(intentos>3)intentos=3;
   // Misma clasificación que la admisión: solo bloquean la regla de las cuatro coincidencias, la reserva de origen y la identidad calculada.
   const {coincidencias,informativas}=clasificarCoincidencias(found.values(),row=>this.identity(row));
   // Igual que la admisión: una reserva de origen cuyo evento ya no existe sigue bloqueando.
   if(huerfana)coincidencias.push(huerfana);
-  const fin=new Date().toISOString(),alcance={coleccion:'eventos',filtros:{negocio:null,estado:null,zona:null,municipio:input.municipio||null,fechas:fDesde||fHasta?{desde:fDesde,hasta:fHasta}:null},incluye:['capturados','retirados','cancelados','pasados','legacy'],excluidoDeLaComparacion:omitidasPrueba?{prueba:omitidasPrueba}:{},limite,documentosEnColeccion:escaneados,composicion:estado,reservasOrigen:input.origen?'consultada':'no_aplica'};
-  return {coincidencias,informativas,modo,...(modo==='listado'?{filtroTotal,listadoTruncado:filtroTotal>LISTADO_MAX}:{}),escaneados,exhaustivo,...(motivoParcial?{motivoParcial}:{}),traza,alcance,barrido:{inicio,fin,intentos,catalogoEstable:!!(guardAntes&&guardAntes===guardDespues)},nota:'REGLA 2.18.0: solo es duplicado (bloquea) lo que coincide en nombre normalizado (minusculas, sin tildes ni signos), fecha, lugar (recinto y municipio) y hora (o falta en uno de los dos); ademas bloquean la reserva de origen y la identidad calculada. confianza=posible_duplicado (en informativas): nombre muy parecido con misma fecha, lugar y hora; no bloquea, revisalo. Cualquier otra señal (URL, sourceId, sesion, titulo contenido) es informativa y no bloquea. alcance describe el barrido: sin filtros, todos los documentos de eventos; el tamaño varia porque otros procesos (p. ej. la sincronizacion de Fever) añaden y borran documentos sin pasar por el MCP; traza localiza el barrido en los logs. Si exhaustivo=false (motivoParcial indica por que) hay registros sin revisar: detén la creación e informa.'};
+  const fin=new Date().toISOString(),alcance={coleccion:'eventos',estrategia,...(estrategia==='indexada'?{consultas}:{}),filtros:{negocio:null,estado:null,zona:null,municipio:input.municipio||null,fechas:fDesde||fHasta?{desde:fDesde,hasta:fHasta}:null},incluye:['capturados','retirados','cancelados','pasados','legacy'],excluidoDeLaComparacion:omitidasPrueba?{prueba:omitidasPrueba}:{},limite,documentosEnColeccion:estrategia==='barrido'?escaneados:null,composicion:estado,reservasOrigen:input.origen?'consultada':'no_aplica'};
+  return {coincidencias,informativas,estrategia,ms:Date.now()-t0,modo,...(modo==='listado'?{filtroTotal,listadoTruncado:filtroTotal>LISTADO_MAX}:{}),escaneados,exhaustivo,...(motivoParcial?{motivoParcial}:{}),traza,alcance,barrido:{inicio,fin,intentos,catalogoEstable:!!(guardAntes&&guardAntes===guardDespues)},nota:'REGLA 2.18.0: solo es duplicado (bloquea) lo que coincide en nombre normalizado (minusculas, sin tildes ni signos), fecha, lugar (recinto y municipio) y hora (o falta en uno de los dos); ademas bloquean la reserva de origen y la identidad calculada. confianza=posible_duplicado (en informativas): nombre muy parecido con misma fecha, lugar y hora; no bloquea, revisalo. Cualquier otra señal (URL, sourceId, sesion, titulo contenido) es informativa y no bloquea. alcance describe el barrido: sin filtros, todos los documentos de eventos; el tamaño varia porque otros procesos (p. ej. la sincronizacion de Fever) añaden y borran documentos sin pasar por el MCP; traza localiza el barrido en los logs. Si exhaustivo=false (motivoParcial indica por que) hay registros sin revisar: detén la creación e informa.'};
  }
  async update({eventId,negocioId,expectedVersion,changes,reason,evidenciaUrl=null,simular=false},principal) {
   authorize(principal,negocioId,'edit');
